@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - deploy/**
-      - .github/workflows/deploy-minds-internal.yml
+      - deploy/digitalocean-app.template.json
+      - deploy/render-digitalocean-spec.sh
   workflow_dispatch:
 
 permissions:
