@@ -349,7 +349,7 @@ jobs:
             | jq -er '.[] | select(.spec.name == "minds-durabull-internal") | .id')
           doctl apps get "$app_id" --output json \
             | jq -e --arg build_id "$GITHUB_SHA" '
-                .spec.services[] |
+                .[0].spec.services[] |
                 select(.name == "durabull") |
                 .image.registry_type == "DOCR" and
                 .image.registry == "training" and
