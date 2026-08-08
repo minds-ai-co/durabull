@@ -9,8 +9,8 @@ import { drizzle as drizzlePglite } from 'drizzle-orm/pglite'
 import { migrate as migratePglite } from 'drizzle-orm/pglite/migrator'
 import pg from 'pg'
 import { shouldUseEnvConnections, syncEnvConnectionsForOrganization } from './env-redis-connections'
-import { organization } from './schemas/organization/schema'
 import * as schema from './schemas'
+import { organization } from './schemas/organization/schema'
 import { relations } from './schemas/relations'
 
 // Get the directory of this file to resolve paths relative to the dal package
@@ -26,6 +26,7 @@ let db: Database | null = null
 let pgPool: pg.Pool | null = null
 let pgliteClient: PGlite | null = null
 let initialized = false
+let initializationPromise: Promise<Database> | null = null
 
 export function getDatabaseMode(): DatabaseMode {
   return env.DATABASE_URL ? 'postgres' : 'pglite'
@@ -53,62 +54,81 @@ function shouldDisableSslForPostgresUrl(connectionString: string): boolean {
  * Uses lazy initialization to avoid creating the connection until needed.
  * Automatically runs migrations on first connection.
  */
-export async function getDb(): Promise<Database> {
-  if (!db) {
-    const dbMode = getDatabaseMode()
+async function initializeDb(): Promise<Database> {
+  const dbMode = getDatabaseMode()
 
-    if (dbMode === 'postgres') {
-      const connectionString = env.DATABASE_URL
-      if (!connectionString) {
-        throw new Error('DATABASE_URL is required for PostgreSQL mode.')
-      }
-
-      pgPool = new pg.Pool({
-        connectionString,
-        ...(shouldDisableSslForPostgresUrl(connectionString) ? { ssl: false } : {}),
-      })
-      const pgDb = drizzleNodePg({ client: pgPool, schema, relations })
-      db = pgDb
-
-      if (!initialized) {
-        console.log('🐘 Connecting to PostgreSQL...')
-        await migrateNodePg(pgDb, { migrationsFolder: migrationsDir })
-
-        if (shouldUseEnvConnections()) {
-          const orgs = await pgDb.select({ id: organization.id }).from(organization)
-          for (const org of orgs) {
-            await syncEnvConnectionsForOrganization(pgDb, org.id)
-          }
-        }
-
-        console.log('✅ Database migrations applied')
-        initialized = true
-      }
-    } else {
-      const dataDir = getPgliteDataDir()
-      await mkdir(dataDir, { recursive: true })
-      pgliteClient = new PGlite({ dataDir })
-      const pgliteDb = drizzlePglite({ client: pgliteClient, schema, relations })
-      db = pgliteDb as unknown as Database
-
-      if (!initialized) {
-        console.log(`🪶 Using PGlite at ${dataDir}`)
-        await migratePglite(pgliteDb, { migrationsFolder: migrationsDir })
-
-        if (shouldUseEnvConnections()) {
-          const orgs = await pgliteDb.select({ id: organization.id }).from(organization)
-          for (const org of orgs) {
-            await syncEnvConnectionsForOrganization(pgliteDb as unknown as Database, org.id)
-          }
-        }
-
-        console.log('✅ Database migrations applied')
-        initialized = true
-      }
+  if (dbMode === 'postgres') {
+    const connectionString = env.DATABASE_URL
+    if (!connectionString) {
+      throw new Error('DATABASE_URL is required for PostgreSQL mode.')
     }
+
+    const nextPool = new pg.Pool({
+      connectionString,
+      ...(shouldDisableSslForPostgresUrl(connectionString) ? { ssl: false } : {}),
+    })
+    const pgDb = drizzleNodePg({ client: nextPool, schema, relations })
+
+    try {
+      console.log('🐘 Connecting to PostgreSQL...')
+      await migrateNodePg(pgDb, { migrationsFolder: migrationsDir })
+
+      if (shouldUseEnvConnections()) {
+        const orgs = await pgDb.select({ id: organization.id }).from(organization)
+        for (const org of orgs) {
+          await syncEnvConnectionsForOrganization(pgDb, org.id)
+        }
+      }
+    } catch (error) {
+      await nextPool.end()
+      throw error
+    }
+
+    pgPool = nextPool
+    db = pgDb
+  } else {
+    const dataDir = getPgliteDataDir()
+    await mkdir(dataDir, { recursive: true })
+    const nextPgliteClient = new PGlite({ dataDir })
+    const pgliteDb = drizzlePglite({ client: nextPgliteClient, schema, relations })
+
+    try {
+      console.log(`🪶 Using PGlite at ${dataDir}`)
+      await migratePglite(pgliteDb, { migrationsFolder: migrationsDir })
+
+      if (shouldUseEnvConnections()) {
+        const orgs = await pgliteDb.select({ id: organization.id }).from(organization)
+        for (const org of orgs) {
+          await syncEnvConnectionsForOrganization(pgliteDb as unknown as Database, org.id)
+        }
+      }
+    } catch (error) {
+      await nextPgliteClient.close()
+      throw error
+    }
+
+    pgliteClient = nextPgliteClient
+    db = pgliteDb as unknown as Database
   }
 
+  console.log('✅ Database migrations applied')
+  initialized = true
   return db
+}
+
+export async function getDb(): Promise<Database> {
+  if (db && initialized) return db
+
+  const pendingInitialization = initializationPromise ?? initializeDb()
+  initializationPromise = pendingInitialization
+
+  try {
+    return await pendingInitialization
+  } finally {
+    if (initializationPromise === pendingInitialization) {
+      initializationPromise = null
+    }
+  }
 }
 
 /**
@@ -130,6 +150,14 @@ export async function getPgPool(): Promise<pg.Pool> {
  * Close the database connection.
  */
 export async function closeDb(): Promise<void> {
+  if (initializationPromise) {
+    try {
+      await initializationPromise
+    } catch {
+      // Initialization already cleaned up its partial client resources.
+    }
+  }
+
   if (pgPool) {
     await pgPool.end()
     pgPool = null
@@ -142,4 +170,5 @@ export async function closeDb(): Promise<void> {
 
   db = null
   initialized = false
+  initializationPromise = null
 }
