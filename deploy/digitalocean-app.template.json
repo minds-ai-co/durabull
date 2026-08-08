@@ -110,7 +110,7 @@
       },
       "instance_size_slug": "apps-s-1vcpu-0.5gb",
       "instance_count": 1,
-      "run_command": "tunnel --no-autoupdate run",
+      "run_command": "cloudflared tunnel --no-autoupdate run",
       "envs": [
         {
           "key": "TUNNEL_TOKEN",
