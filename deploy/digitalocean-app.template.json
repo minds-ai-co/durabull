@@ -48,6 +48,11 @@
           "scope": "RUN_TIME"
         },
         {
+          "key": "DURABULL_PROCESSOR_COMPONENTS",
+          "value": "[{\"name\":\"processor-build-p1\",\"label\":\"Creation · phase 1\",\"description\":\"Grounds audiences, prepares inputs, and starts Mind creation.\",\"processors\":[\"draft-group\",\"group-creation\",\"group-grounding\",\"input-context\",\"mind-phase-one\"]},{\"name\":\"processor-build-p2\",\"label\":\"Creation · phase 2\",\"description\":\"Collects and enriches Minds, processes media, and generates imagery.\",\"processors\":[\"auto-spark\",\"group-cover-image\",\"media-processing\",\"mind-collection\",\"spark-profile-image\"]},{\"name\":\"processor-interactive\",\"label\":\"Interactive\",\"description\":\"Runs user-triggered agents, panels, questionnaires, exports, and heatmaps.\",\"processors\":[\"agent-run\",\"entity-export\",\"formation\",\"panel-export\",\"panel-postprocessing\",\"panel-response-shard\",\"panel-website-heatmap\",\"panel-website-heatmap-export\",\"questionnaire-run\"]},{\"name\":\"processor-background\",\"label\":\"Background\",\"description\":\"Runs schedules, maintenance, retries, reconciliation, and external synchronization.\",\"processors\":[\"cron-checkout-recovery-drip\",\"cron-cleanup-stuck-jobs\",\"cron-cleanup-test-accounts\",\"cron-cleanup-unused-numbers\",\"cron-daily-digest\",\"cron-dispatch-flow-schedules\",\"cron-langfuse-ingestion-watchdog\",\"cron-queue-health-snapshot\",\"cron-process-response-auto-recharges\",\"cron-reconcile-subscriptions\",\"cron-renew-calendar-webhooks\",\"cron-retry-google-ads-signups\",\"cron-retry-marketplace-payouts\",\"cron-retry-undelivered-analytics\",\"cron-watch-knowledge-items\",\"flow-schedule-run\",\"reprocess-portfolio-item\",\"watch-knowledge-items\",\"whatsapp-sync\"]}]",
+          "scope": "RUN_TIME"
+        },
+        {
           "key": "DURABULL_REDIS_URL_ENCRYPTION_KEY",
           "value": "__DURABULL_REDIS_URL_ENCRYPTION_KEY__",
           "scope": "RUN_TIME",

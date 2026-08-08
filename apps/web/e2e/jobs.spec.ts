@@ -167,8 +167,7 @@ test.describe('Jobs', () => {
     const createdJobs: string[] = []
 
     try {
-      const token = `e2e-processor-${Date.now()}`
-      const processorNames = [`${token}-alpha`, `${token}-beta`]
+      const processorNames = ['draft-group', 'mind-collection']
 
       for (const name of processorNames) {
         const jobId = await createJob(page, {
@@ -184,7 +183,6 @@ test.describe('Jobs', () => {
       await page.goto(`/${TEST_ORG_SLUG}/c/${connectionId}/queues/${queueName}`)
       const processorSearch = page.getByLabel('Search jobs by processor')
       await expect(processorSearch).toBeVisible({ timeout: 15000 })
-      await processorSearch.fill(token)
 
       for (const name of processorNames) {
         await expect(page.getByTestId(`processor-group-${name}`)).toBeVisible({ timeout: 15000 })
@@ -206,9 +204,24 @@ test.describe('Jobs', () => {
       }
 
       await page.goto(`/${TEST_ORG_SLUG}/c/${connectionId}/workers`)
-      await expect(page.getByRole('heading', { name: /Queue Topology/ })).toBeVisible({
+      await expect(page.getByRole('heading', { name: /Worker Topology/ })).toBeVisible({
         timeout: 15000,
       })
+      for (const componentName of [
+        'processor-build-p1',
+        'processor-build-p2',
+        'processor-interactive',
+        'processor-background',
+      ]) {
+        await expect(page.getByTestId(`topology-component-${componentName}`)).toBeVisible()
+      }
+
+      await page.getByLabel('Topology component').selectOption('processor-build-p1')
+      await expect(page.getByTestId('topology-processor-draft-group')).toBeVisible()
+      await page.getByLabel('Topology component').selectOption('processor-build-p2')
+      await expect(page.getByTestId('topology-processor-mind-collection')).toBeVisible()
+
+      await page.getByLabel('Topology view').selectOption('queues')
       await page.getByLabel('Topology queue').selectOption(queueName)
       for (const name of processorNames) {
         await expect(page.getByTestId(`topology-processor-${name}`)).toBeVisible({ timeout: 15000 })

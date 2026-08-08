@@ -9,11 +9,22 @@ Workers route:
 
 - `/$orgSlug/c/$connectionId/workers`
 
-This view combines topology visualization and worker detail table.
+This view combines topology visualization and a component-aware worker detail table.
 
 ## Topology Model
 
-The graph renders nodes and edges for:
+When `DURABULL_PROCESSOR_COMPONENTS` is configured, the default graph renders:
+
+- Redis connection
+- deployed processor components
+- configured processor workloads when a component is focused
+- observed-job and connected-worker evidence for each workload
+
+The component overview remains visible even when no jobs from a configured
+workload occur in the current sample. Workloads missing from the configuration
+appear under **Unassigned**, making configuration drift visible.
+
+The queue view remains available and renders:
 
 - Redis node
 - Queue nodes
@@ -36,8 +47,9 @@ Current UI rule:
 
 Returns:
 
+- configured processor-component metadata
 - worker list with queue context
-- queue rollups (worker count, pause status, active/waiting counts)
+- queue rollups (worker count, pause status, active/waiting counts, and observed processors)
 - queue-level pagination metadata
 
 ## Practical Use Cases

@@ -95,6 +95,8 @@ const envSchema = z.object({
   /** Dev-only MCP bearer when `DURABULL_AUTHLESS=true` (use a long random value locally). */
   MCP_AUTHLESS_BEARER_TOKEN: optionalString,
   DURABULL_ENV_CONNECTIONS: optionalBoolean,
+  /** Optional JSON array describing deployment components and their processor/workload names. */
+  DURABULL_PROCESSOR_COMPONENTS: optionalString,
   DURABULL_REDIS_URL_ENCRYPTION_KEY: optionalString,
   DURABULL_SECRET_ENCRYPTION_KEY: optionalString,
   DURABULL_REDIS_PORT: optionalInt,

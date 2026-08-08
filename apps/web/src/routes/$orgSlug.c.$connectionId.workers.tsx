@@ -10,10 +10,8 @@ import {
   type NodeProps,
   Position,
   ReactFlow,
-  useEdgesState,
-  useNodesState,
 } from '@xyflow/react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import '@xyflow/react/dist/style.css'
 
 // Worker type - matches API response
@@ -42,6 +40,7 @@ import {
 } from 'lucide-react'
 import { useAppTopBar } from '@/components/app-top-bar'
 import { useConnection } from '@/components/connection-provider'
+import { DeploymentComponentNode } from '@/components/deployment-component-node'
 import { ProcessorTopologyNode } from '@/components/processor-topology-node'
 import { QueueNameTag } from '@/components/queue-name-tag'
 import { Badge } from '@/components/ui/badge'
@@ -51,6 +50,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { WorkerComponentsTable } from '@/components/worker-components-table'
 import { type ListWorkersResponse, useAllWorkers } from '@/hooks/use-queues'
+import { buildProcessorComponentTopology } from '@/lib/processor-components'
 import { cn, formatDuration } from '@/lib/utils'
 
 export const Route = createFileRoute('/$orgSlug/c/$connectionId/workers')({
@@ -255,6 +255,7 @@ function WorkerNode({ data }: NodeProps) {
 
 const nodeTypes = {
   redis: RedisNode,
+  component: DeploymentComponentNode,
   queue: QueueNode,
   processor: ProcessorTopologyNode,
   worker: WorkerNode,
@@ -263,9 +264,9 @@ const nodeTypes = {
 function WorkersPage() {
   const { data, isLoading, error } = useAllWorkers()
   const { currentConnection } = useConnection()
+  const [topologyMode, setTopologyMode] = useState<'components' | 'queues'>('components')
+  const [topologyComponent, setTopologyComponent] = useState('')
   const [topologyQueue, setTopologyQueue] = useState('')
-  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const topBarConfig = useMemo(
     () => ({
       left: (
@@ -275,7 +276,7 @@ function WorkersPage() {
           </span>
           <h1 className="truncate text-base font-semibold md:text-lg">Workers</h1>
           <span className="hidden text-sm text-muted-foreground xl:inline">
-            Visualize queues, observed processors, and connected workers
+            Map deployment components, processor workloads, queues, and workers
           </span>
         </div>
       ),
@@ -285,12 +286,113 @@ function WorkersPage() {
 
   useAppTopBar(topBarConfig)
 
-  // Build the flow graph - use useMemo for stable positions
-  const buildGraph = useCallback(() => {
-    if (!data) return
+  const componentTopologyEnabled = (data?.processorComponents.length ?? 0) > 0
+  const activeTopologyMode = componentTopologyEnabled ? topologyMode : 'queues'
+
+  // Derive the full graph from API data and the selected scope for stable positions.
+  const graph = useMemo(() => {
+    if (!data) return { nodes: [] as Node[], edges: [] as Edge[] }
 
     const newNodes: Node[] = []
     const newEdges: Edge[] = []
+
+    if (activeTopologyMode === 'components') {
+      const allComponents = buildProcessorComponentTopology(data)
+      const visibleComponents = allComponents.filter(
+        (component) => !topologyComponent || component.name === topologyComponent
+      )
+      const expanded = topologyComponent !== ''
+      const componentLayouts = visibleComponents.map((component) => ({
+        component,
+        height: expanded ? Math.max(190, component.workloads.length * 90) : 190,
+      }))
+      const totalGraphHeight =
+        componentLayouts.reduce((total, layout) => total + layout.height, 0) +
+        Math.max(0, componentLayouts.length - 1) * 60
+      let nextComponentTop = 0
+
+      newNodes.push({
+        id: 'redis',
+        type: 'redis',
+        position: { x: 0, y: Math.max(0, totalGraphHeight / 2 - 60) },
+        data: {
+          label: currentConnection?.name ?? 'Redis',
+          totalQueues: data.totalQueues,
+          totalWorkers: data.totalWorkers,
+        },
+      })
+
+      componentLayouts.forEach(({ component, height }, componentIndex) => {
+        const componentId = `component-${component.name}`
+        const componentY = nextComponentTop + height / 2 - 75
+        nextComponentTop += height + 60
+
+        newNodes.push({
+          id: componentId,
+          type: 'component',
+          position: { x: 360, y: componentY },
+          data: {
+            name: component.name,
+            label: component.label,
+            description: component.description,
+            workloadCount: component.workloads.length,
+            observedWorkloads: component.observedWorkloads,
+            accentIndex: componentIndex,
+          },
+        })
+        newEdges.push({
+          id: `redis-${componentId}`,
+          source: 'redis',
+          target: componentId,
+          type: 'smoothstep',
+          style: { stroke: 'var(--color-primary)', strokeWidth: 2 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-primary)' },
+        })
+
+        if (!expanded) return
+
+        const workloadStartY = componentY - ((component.workloads.length - 1) * 90) / 2
+        component.workloads.forEach((workload, workloadIndex) => {
+          const processorId = `component-processor-${component.name}-${workload.name}`
+          newNodes.push({
+            id: processorId,
+            type: 'processor',
+            position: { x: 760, y: workloadStartY + workloadIndex * 90 },
+            data: {
+              label: workload.name,
+              observedJobs: workload.observedJobs,
+              workerCount: workload.workerCount,
+              queueNames: workload.queueNames,
+              configured: workload.configured,
+            },
+          })
+          newEdges.push({
+            id: `${componentId}-${processorId}`,
+            source: componentId,
+            target: processorId,
+            type: 'smoothstep',
+            style: {
+              stroke:
+                workload.observedJobs > 0 || workload.workerCount > 0
+                  ? 'var(--color-primary)'
+                  : 'var(--color-border)',
+              strokeWidth: workload.observedJobs > 0 || workload.workerCount > 0 ? 1.5 : 1,
+              strokeDasharray:
+                workload.observedJobs > 0 || workload.workerCount > 0 ? undefined : '5 5',
+            },
+            markerEnd: {
+              type: MarkerType.ArrowClosed,
+              color:
+                workload.observedJobs > 0 || workload.workerCount > 0
+                  ? 'var(--color-primary)'
+                  : 'var(--color-border)',
+            },
+          })
+        })
+      })
+
+      return { nodes: newNodes, edges: newEdges }
+    }
 
     // Sort queues alphabetically to ensure stable ordering
     const sortedQueues = data.queues
@@ -386,7 +488,8 @@ function WorkersPage() {
             data: {
               label: child.processor.name,
               observedJobs: child.processor.observedJobs,
-              queueName: queue.name,
+              queueNames: [queue.name],
+              configured: false,
             },
           })
           newEdges.push({
@@ -434,13 +537,8 @@ function WorkersPage() {
       })
     })
 
-    setNodes(newNodes)
-    setEdges(newEdges)
-  }, [data, currentConnection, topologyQueue, setNodes, setEdges])
-
-  useEffect(() => {
-    buildGraph()
-  }, [buildGraph])
+    return { nodes: newNodes, edges: newEdges }
+  }, [data, currentConnection, activeTopologyMode, topologyComponent, topologyQueue])
 
   // Stats
   const stats = useMemo(() => {
@@ -453,6 +551,7 @@ function WorkersPage() {
       active: activeWorkers,
       idle: idleWorkers,
       queues: data.totalQueues,
+      components: data.processorComponents.length,
       processors: data.queues.reduce(
         (total, queue) => total + queue.processorObservation.processors.length,
         0
@@ -461,6 +560,10 @@ function WorkersPage() {
   }, [data])
   const processorObservationIncomplete = data?.queues.some(
     (queue) => !queue.processorObservation.available || queue.processorObservation.truncated
+  )
+  const topologyComponents = useMemo(
+    () => (data ? buildProcessorComponentTopology(data) : []),
+    [data]
   )
 
   if (error) {
@@ -478,7 +581,7 @@ function WorkersPage() {
   return (
     <div className="space-y-6">
       {/* Stats */}
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
         <StatCard
           title="Total Workers"
           value={stats?.total ?? 0}
@@ -508,6 +611,13 @@ function WorkersPage() {
           variant="blue"
         />
         <StatCard
+          title="Components"
+          value={stats?.components ?? 0}
+          icon={Network}
+          loading={isLoading}
+          variant="blue"
+        />
+        <StatCard
           title="Observed processors"
           value={stats?.processors ?? 0}
           icon={Boxes}
@@ -522,7 +632,7 @@ function WorkersPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <CardTitle className="text-base font-medium flex items-center gap-2">
               <Network className="h-4 w-4 text-muted-foreground" />
-              Queue Topology
+              Worker Topology
               {processorObservationIncomplete ? (
                 <Badge variant="warning" className="font-normal">
                   Processor sample incomplete
@@ -530,43 +640,93 @@ function WorkersPage() {
               ) : null}
             </CardTitle>
             <div className="flex flex-wrap items-center justify-end gap-4">
-              <Select
-                aria-label="Topology queue"
-                className="h-8 min-w-48 text-xs"
-                value={topologyQueue}
-                onChange={(event) => setTopologyQueue(event.target.value)}
-              >
-                <option value="">All queues</option>
-                {data?.queues
-                  .slice()
-                  .sort((left, right) => left.name.localeCompare(right.name))
-                  .map((queue) => (
-                    <option key={queue.name} value={queue.name}>
-                      {queue.name}
+              {componentTopologyEnabled ? (
+                <Select
+                  aria-label="Topology view"
+                  className="h-8 min-w-48 text-xs"
+                  value={activeTopologyMode}
+                  onChange={(event) => {
+                    setTopologyMode(event.target.value as 'components' | 'queues')
+                    setTopologyComponent('')
+                    setTopologyQueue('')
+                  }}
+                >
+                  <option value="components">Deployment components</option>
+                  <option value="queues">Queues</option>
+                </Select>
+              ) : null}
+              {activeTopologyMode === 'components' ? (
+                <Select
+                  aria-label="Topology component"
+                  className="h-8 min-w-56 text-xs"
+                  value={topologyComponent}
+                  onChange={(event) => setTopologyComponent(event.target.value)}
+                >
+                  <option value="">All components</option>
+                  {topologyComponents.map((component) => (
+                    <option key={component.name} value={component.name}>
+                      {component.label}
                     </option>
                   ))}
-              </Select>
+                </Select>
+              ) : (
+                <Select
+                  aria-label="Topology queue"
+                  className="h-8 min-w-48 text-xs"
+                  value={topologyQueue}
+                  onChange={(event) => setTopologyQueue(event.target.value)}
+                >
+                  <option value="">All queues</option>
+                  {data?.queues
+                    .slice()
+                    .sort((left, right) => left.name.localeCompare(right.name))
+                    .map((queue) => (
+                      <option key={queue.name} value={queue.name}>
+                        {queue.name}
+                      </option>
+                    ))}
+                </Select>
+              )}
               <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
                 <div className="flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-status-danger" />
                   Redis
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-status-active" />
-                  Queue
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-primary" />
-                  Processor
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-status-success" />
-                  Worker
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-4 h-0.5 bg-gradient-to-r from-status-success to-status-success animate-pulse" />
-                  Active
-                </div>
+                {activeTopologyMode === 'components' ? (
+                  <>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-status-active" />
+                      Deployment component
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-primary" />
+                      Observed workload
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full border border-dashed border-muted-foreground" />
+                      Configured
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-status-active" />
+                      Queue
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-primary" />
+                      Processor
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-status-success" />
+                      Worker
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-4 h-0.5 bg-gradient-to-r from-status-success to-status-success animate-pulse" />
+                      Active
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -579,10 +739,10 @@ function WorkersPage() {
                   <div className="w-16 h-16 border-4 border-muted rounded-full" />
                   <div className="absolute inset-0 w-16 h-16 border-4 border-primary border-t-transparent rounded-full animate-spin" />
                 </div>
-                <p className="text-muted-foreground">Loading queue topology...</p>
+                <p className="text-muted-foreground">Loading worker topology...</p>
               </div>
             </div>
-          ) : data?.totalQueues === 0 ? (
+          ) : data?.totalQueues === 0 && activeTopologyMode === 'queues' ? (
             <div className="flex flex-col items-center justify-center h-full">
               <div className="rounded-full bg-muted p-6 mb-4">
                 <WifiOff className="h-10 w-10 text-muted-foreground" />
@@ -595,13 +755,11 @@ function WorkersPage() {
             </div>
           ) : (
             <ReactFlow
-              nodes={nodes}
-              edges={edges}
-              onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
+              nodes={graph.nodes}
+              edges={graph.edges}
               nodeTypes={nodeTypes}
               fitView
-              key={topologyQueue || 'all-queues'}
+              key={`${activeTopologyMode}-${topologyComponent || topologyQueue || 'all'}`}
               fitViewOptions={{ padding: 0.2 }}
               minZoom={0.3}
               maxZoom={1.5}
@@ -619,6 +777,7 @@ function WorkersPage() {
                 className="!bg-card !border-border"
                 nodeColor={(node) => {
                   if (node.type === 'redis') return '#ef4444'
+                  if (node.type === 'component') return '#8b5cf6'
                   if (node.type === 'queue') return '#3b82f6'
                   if (node.type === 'processor') return 'var(--color-primary)'
                   return '#22c55e'
