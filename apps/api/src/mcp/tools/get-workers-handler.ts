@@ -3,6 +3,7 @@ import type { GetWorkersHandlerInput, GetWorkersHandlerOutput } from '@durabull/
 
 import { getQueue } from '../../lib/redis'
 import { toRedisConnectionOptions } from '../../lib/connection-options'
+import { getProcessorComponents } from '../../lib/processor-components'
 import {
   encodeWorkersCursor,
   McpToolError,
@@ -124,6 +125,7 @@ export async function getWorkersHandler(
 
   return {
     connectionId: connection.id,
+    processorComponents: getProcessorComponents(),
     totalQueues,
     totalWorkersInPage: workers.length,
     workers,

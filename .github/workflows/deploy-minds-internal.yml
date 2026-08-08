@@ -302,22 +302,35 @@ jobs:
           production_connection_id=$(jq -er \
             '.connections[] | select(.name == "Production") | .id' \
             "$RUNNER_TEMP/durabull-mcp-connections.json")
-          workers_body="$RUNNER_TEMP/durabull-workers.json"
+          workers_payload=$(jq -cn \
+            --arg connection_id "$production_connection_id" \
+            '{jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"get_workers",arguments:{connectionId:$connection_id,pageSize:1}}}')
+          workers_body="$RUNNER_TEMP/durabull-mcp-workers.txt"
           curl -fsS \
             --max-time 30 \
             -o "$workers_body" \
             "${access_headers[@]}" \
-            "$base_url/api/c/$production_connection_id/workers?pageSize=1"
+            -H "Origin: $base_url" \
+            -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
+            -H "Mcp-Session-Id: $mcp_session_id" \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'Content-Type: application/json' \
+            --data "$workers_payload" \
+            "$base_url/mcp"
+          workers_json="$RUNNER_TEMP/durabull-mcp-workers.json"
+          sed -n 's/^data: //p' "$workers_body" | tail -n 1 > "$workers_json"
           jq -e '
-            (.processorComponents | map(.name)) == [
-              "processor-build-p1",
-              "processor-build-p2",
-              "processor-interactive",
-              "processor-background"
-            ] and
-            (.processorComponents | map(.processors[]) | length) == 38 and
-            (.processorComponents | map(.processors[]) | unique | length) == 38
-          ' "$workers_body" >/dev/null
+            .result.isError != true and
+            ((.result.content[0].text | fromjson).processorComponents as $components |
+              ($components | map(.name)) == [
+                "processor-build-p1",
+                "processor-build-p2",
+                "processor-interactive",
+                "processor-background"
+              ] and
+              ($components | map(.processors[]) | length) == 38 and
+              ($components | map(.processors[]) | unique | length) == 38)
+          ' "$workers_json" >/dev/null
 
           for connection_name in Production Staging; do
             connection_id=$(jq -er \

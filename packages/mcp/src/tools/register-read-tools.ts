@@ -313,6 +313,12 @@ export interface GetWorkersHandlerInput {
 export interface GetWorkersHandlerOutput {
   [key: string]: unknown
   connectionId: string
+  processorComponents: Array<{
+    name: string
+    label: string
+    description: string
+    processors: string[]
+  }>
   totalQueues: number
   totalWorkersInPage: number
   workers: Array<{
