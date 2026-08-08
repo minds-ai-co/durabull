@@ -107,13 +107,17 @@ export function WorkerComponentsTable({ data }: { data: ListWorkersResponse }) {
             </p>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-            <label className="relative min-w-56 flex-1 sm:flex-none">
+            <label
+              htmlFor="worker-component-search"
+              className="relative min-w-56 flex-1 sm:flex-none"
+            >
               <span className="sr-only">Search components</span>
               <Search
                 className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
                 aria-hidden="true"
               />
               <Input
+                id="worker-component-search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search component or queue"
