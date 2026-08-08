@@ -17,6 +17,7 @@ required=(
   DURABULL_SECRET_ENCRYPTION_KEY
   DURABULL_PRODUCTION_REDIS_URL
   DURABULL_STAGING_REDIS_URL
+  DURABULL_IMAGE_TAG
 )
 
 missing=()
@@ -31,6 +32,11 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 1
 fi
 
+if [[ ! "$DURABULL_IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "DURABULL_IMAGE_TAG must be a full lowercase Git commit SHA" >&2
+  exit 1
+fi
+
 jq \
   --arg tunnelToken "$CLOUDFLARE_TUNNEL_TOKEN" \
   --arg mcpBearer "$DURABULL_MCP_AUTHLESS_BEARER" \
@@ -38,6 +44,7 @@ jq \
   --arg secretEncryptionKey "$DURABULL_SECRET_ENCRYPTION_KEY" \
   --arg productionRedisUrl "$DURABULL_PRODUCTION_REDIS_URL" \
   --arg stagingRedisUrl "$DURABULL_STAGING_REDIS_URL" \
+  --arg imageTag "$DURABULL_IMAGE_TAG" \
   '
     def setenv($key; $value):
       (.services[] | select(.name == "durabull").envs[] | select(.key == $key).value) = $value;
@@ -47,6 +54,7 @@ jq \
     setenv("DURABULL_SECRET_ENCRYPTION_KEY"; $secretEncryptionKey) |
     setenv("DURABULL_REDIS_URL_PRODUCTION"; $productionRedisUrl) |
     setenv("DURABULL_REDIS_URL_STAGING"; $stagingRedisUrl) |
+    (.services[] | select(.name == "durabull").image.tag) = $imageTag |
     (.workers[] | select(.name == "cloudflared").envs[] | select(.key == "TUNNEL_TOKEN").value) = $tunnelToken
   ' "$template" > "$output"
 

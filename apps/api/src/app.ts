@@ -1,3 +1,4 @@
+import { isAllowedPosthogHostname } from '@durabull/analytics/server'
 import { getDatabaseMode, getDb, shouldUseEnvConnections, user } from '@durabull/dal'
 import { env } from '@durabull/env'
 import { eq } from 'drizzle-orm'
@@ -10,6 +11,7 @@ import { secureHeaders } from 'hono/secure-headers'
 
 import { getAuth } from './lib/auth'
 import { isAuthlessMode } from './lib/authless'
+import { bootstrapServerAnalytics } from './lib/configure-server-analytics'
 import { getAppVersionPayload } from './lib/build-info'
 import { mountMcpWellKnownRoutes } from './mcp/auth/mount-well-known'
 import { mountMcpIngress } from './mcp/mount'
@@ -27,6 +29,7 @@ import alertsRoutes from './routes/alerts'
 import alertsGlobalRoutes from './routes/alerts-global'
 import authRoutes from './routes/auth'
 import connectionsRoutes from './routes/connections'
+import mcpOAuthRoutes from './routes/mcp-oauth'
 import invitationsRoutes from './routes/invitations'
 import jobsRoutes from './routes/jobs'
 import metricsRoutes from './routes/metrics'
@@ -37,6 +40,10 @@ import teamRoutes from './routes/team'
 import telemetryRoutes, { getTelemetryStatus } from './routes/telemetry'
 import userSettingsRoutes from './routes/user-settings'
 import workersRoutes from './routes/workers'
+import alertDestinationsRoutes from './routes/alert-destinations'
+import alertWebhookDestinationsRoutes from './routes/alert-webhook-destinations'
+
+bootstrapServerAnalytics()
 
 const DEFAULT_POSTHOG_API_HOST = 'https://us.i.posthog.com'
 const DEFAULT_POSTHOG_UI_HOST = 'https://us.posthog.com'
@@ -67,6 +74,13 @@ function getPosthogApiHost(): string {
     if (pointsToAppHost || pointsToProxyPath) {
       console.warn(
         `[PostHog] POSTHOG_HOST "${rawHost}" points to this app/proxy. Falling back to ${DEFAULT_POSTHOG_API_HOST}`
+      )
+      return DEFAULT_POSTHOG_API_HOST
+    }
+
+    if (parsedHost.protocol !== 'https:' || !isAllowedPosthogHostname(parsedHost.hostname)) {
+      console.warn(
+        `[PostHog] POSTHOG_HOST "${rawHost}" is not an allowed PostHog host. Falling back to ${DEFAULT_POSTHOG_API_HOST}`
       )
       return DEFAULT_POSTHOG_API_HOST
     }
@@ -209,6 +223,9 @@ const apiRoutes = new Hono()
   .route('/team', teamRoutes)
   // User settings
   .route('/user-settings', userSettingsRoutes)
+  .route('/alerts/destinations', alertDestinationsRoutes)
+  // Deprecated alias for the webhook-only destination API.
+  .route('/alerts/webhook-destinations', alertWebhookDestinationsRoutes)
   .route('/alerts', alertsGlobalRoutes)
   // Connected routes under /c/:connectionId
   .route('/c/:connectionId/alerts', alertsRoutes)
@@ -308,7 +325,7 @@ export async function createApiApp(options: CreateApiAppOptions = {}) {
     '/api/*',
     cors({
       origin: corsOrigins,
-      allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowHeaders: ['Content-Type', 'Authorization'],
       credentials: true, // Required for auth cookies
     })
@@ -387,6 +404,7 @@ export async function createApiApp(options: CreateApiAppOptions = {}) {
   api.use('/connections/*', sessionMiddleware)
   api.use('/team/*', sessionMiddleware)
   api.use('/user-settings/*', sessionMiddleware)
+  api.use('/mcp/*', sessionMiddleware)
   api.use('/alerts/*', sessionMiddleware)
   // Connection middleware includes session handling - no need for both
   api.use('/c/:connectionId/*', connectionMiddleware)
@@ -406,6 +424,9 @@ export async function createApiApp(options: CreateApiAppOptions = {}) {
     .route('/connections', connectionsRoutes)
     .route('/team', teamRoutes)
     .route('/user-settings', userSettingsRoutes)
+    .route('/mcp', mcpOAuthRoutes)
+    .route('/alerts/destinations', alertDestinationsRoutes)
+    .route('/alerts/webhook-destinations', alertWebhookDestinationsRoutes)
     .route('/alerts', alertsGlobalRoutes)
     .route('/c/:connectionId/alerts', alertsRoutes)
     .route('/c/:connectionId/queues', queuesRoutes)

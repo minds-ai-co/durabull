@@ -24,8 +24,36 @@ type DeleteAlertRuleResponse = InferResponseType<
   ConnectionAlertsEndpoint['rules'][':ruleId']['$delete'],
   200
 >
+type SnoozeAlertRuleResponse = InferResponseType<
+  ConnectionAlertsEndpoint['rules'][':ruleId']['snooze']['$post'],
+  200
+>
+type UnsnoozeAlertRuleResponse = InferResponseType<
+  ConnectionAlertsEndpoint['rules'][':ruleId']['snooze']['$delete'],
+  200
+>
 type ResolveAlertEventResponse = InferResponseType<
   ConnectionAlertsEndpoint['events'][':eventId']['resolve']['$post'],
+  200
+>
+type AcknowledgeAlertEventResponse = InferResponseType<
+  ConnectionAlertsEndpoint['events'][':eventId']['acknowledge']['$post'],
+  200
+>
+type RetryAlertDeliveryResponse = InferResponseType<
+  ConnectionAlertsEndpoint['events'][':eventId']['deliveries'][':deliveryId']['retry']['$post'],
+  200
+>
+type ResolveGlobalAlertEventResponse = InferResponseType<
+  (typeof api.alerts.events)[':eventId']['resolve']['$post'],
+  200
+>
+type AcknowledgeGlobalAlertEventResponse = InferResponseType<
+  (typeof api.alerts.events)[':eventId']['acknowledge']['$post'],
+  200
+>
+type BulkResolveAlertEventsResponse = InferResponseType<
+  ConnectionAlertsEndpoint['events']['resolve-bulk']['$post'],
   200
 >
 type TestAlertRuleResponse = InferResponseType<
@@ -44,13 +72,24 @@ type LinearMetadataResponse = InferResponseType<
   (typeof api.alerts.integrations.linear.metadata)['$get'],
   200
 >
-
+type AlertDestinationsResponse = InferResponseType<(typeof api.alerts.destinations)['$get'], 200>
+type AlertDestinationResponse = InferResponseType<(typeof api.alerts.destinations)['$post'], 201>
+type UpdateAlertDestinationResponse = InferResponseType<
+  (typeof api.alerts.destinations)[':destinationId']['$patch'],
+  200
+>
+type TestAlertDestinationResponse = InferResponseType<
+  (typeof api.alerts.destinations)[':destinationId']['test']['$post'],
+  200
+>
 export type AlertSummaryConnection = AlertSummaryResponse['connections'][number]
 export type AlertRuleType = 'failure_threshold' | 'failure_rate' | 'queue_stalled' | 'job_failed'
 export type QueueFilterMode = 'include' | 'exclude'
 export type AlertEventStatus = 'firing' | 'resolved' | 'suppressed'
+export type AlertRuleState = 'active' | 'snoozed' | 'disabled'
 
 export type AlertNotificationChannel =
+  | { type: 'destination'; destinationId: string }
   | { type: 'email'; target: string }
   | {
       type: 'linear'
@@ -69,12 +108,17 @@ export type AlertNotificationChannel =
       secretConfigured?: boolean
       secretLast4?: string
     }
+  | {
+      type: 'webhook'
+      destinationId: string
+    }
 
 export interface AlertDeliveryRecord {
   id: string
   channelType: 'email' | 'linear' | 'webhook'
   status: 'pending' | 'claimed' | 'delivered' | 'failed'
   target: string
+  attemptCount?: number | null
   externalIdentifier?: string | null
   externalUrl?: string | null
   lastError?: string | null
@@ -94,6 +138,8 @@ export interface AlertRuleRecord {
   enabled: boolean
   notificationChannels: AlertNotificationChannel[]
   cooldownMinutes: number
+  mutedUntil: string | Date | null
+  state: AlertRuleState
   createdAt?: string | Date
   updatedAt?: string | Date
 }
@@ -111,6 +157,9 @@ export interface AlertEventRecord {
   firedAt: string | Date
   resolvedAt?: string | Date | null
   notificationSentAt?: string | Date | null
+  acknowledgedAt: string | Date | null
+  acknowledgedBy: string | null
+  acknowledgedByName: string | null
   deliveries: AlertDeliveryRecord[]
 }
 
@@ -136,6 +185,67 @@ export interface LinearMetadataRecord {
   labels: Array<{ id: string; name: string }>
   users: Array<{ id: string; name: string; email?: string | null }>
   states: Array<{ id: string; name: string; teamId: string }>
+}
+
+export type AlertDestinationType = 'webhook' | 'email' | 'linear'
+
+export interface LinearDestinationConfig {
+  teamId?: string
+  projectId?: string
+  labelIds?: string[]
+  assigneeId?: string
+  stateId?: string
+  priority?: number
+}
+
+export interface AlertDestinationRecord {
+  id: string
+  organizationId: string
+  name: string
+  type: AlertDestinationType
+  url: string | null
+  config: Record<string, unknown>
+  enabled: boolean
+  secretConfigured: boolean
+  secretLast4?: string
+  inUseByRuleCount: number
+  createdAt?: string | Date
+  updatedAt?: string | Date
+}
+
+/** Minimal destination shape returned as a sidecar on the rules list. */
+export interface AlertRuleDestinationSummary {
+  id: string
+  name: string
+  type: AlertDestinationType
+  enabled: boolean
+}
+
+export type AlertDestinationCreateInput =
+  | {
+      type: 'webhook'
+      name: string
+      url: string
+      signingSecret?: string | null
+      enabled?: boolean
+    }
+  | { type: 'email'; name: string; config: { target: string }; enabled?: boolean }
+  | { type: 'linear'; name: string; config?: LinearDestinationConfig; enabled?: boolean }
+
+export interface AlertDestinationUpdateInput {
+  name?: string
+  url?: string
+  signingSecret?: string | null
+  config?: Record<string, unknown>
+  enabled?: boolean
+}
+
+export interface AlertDestinationTestResult {
+  success: boolean
+  httpStatus?: number | null
+  durationMs?: number
+  organizationName?: string
+  error?: string
 }
 
 export interface AlertTestResult {
@@ -180,11 +290,14 @@ export interface AlertRuleMutationInput {
 }
 
 export interface AlertEventFilterOptions {
+  connectionId?: string
   status?: AlertEventStatus
+  acknowledged?: boolean
   limit?: number
   offset?: number
   queueName?: string
   jobId?: string
+  alertRuleId?: string
 }
 
 export const alertKeys = {
@@ -196,6 +309,10 @@ export const alertKeys = {
     ['alerts', 'integrations', 'linear', organizationId ?? 'unknown'] as const,
   linearMetadata: (organizationId?: string | null) =>
     ['alerts', 'integrations', 'linear', organizationId ?? 'unknown', 'metadata'] as const,
+  destinations: (organizationId?: string | null, type?: AlertDestinationType) =>
+    type
+      ? (['alerts', 'destinations', organizationId ?? 'unknown', type] as const)
+      : (['alerts', 'destinations', organizationId ?? 'unknown'] as const),
   connectionRules: (connectionId: string) =>
     ['alerts', 'connection', connectionId, 'rules'] as const,
   connectionEvents: (connectionId: string, filters: AlertEventFilterOptions = {}) =>
@@ -248,9 +365,63 @@ function normalizeNotificationChannels(value: unknown): AlertNotificationChannel
         },
       ]
     }
+    if (entry.type === 'webhook' && typeof entry.destinationId === 'string') {
+      return [
+        {
+          type: 'webhook',
+          destinationId: entry.destinationId,
+        },
+      ]
+    }
+    if (entry.type === 'destination' && typeof entry.destinationId === 'string') {
+      return [
+        {
+          type: 'destination',
+          destinationId: entry.destinationId,
+        },
+      ]
+    }
     if (entry.type !== 'email' || typeof entry.target !== 'string') return []
     return [{ type: 'email', target: entry.target }]
   })
+}
+
+function isAlertDestinationType(value: unknown): value is AlertDestinationType {
+  return value === 'webhook' || value === 'email' || value === 'linear'
+}
+
+function normalizeAlertDestination(value: unknown): AlertDestinationRecord {
+  const source = isRecord(value) ? value : {}
+  return {
+    id: typeof source.id === 'string' ? source.id : '',
+    organizationId: typeof source.organizationId === 'string' ? source.organizationId : '',
+    name: typeof source.name === 'string' ? source.name : 'Destination',
+    type: isAlertDestinationType(source.type) ? source.type : 'webhook',
+    url: typeof source.url === 'string' ? source.url : null,
+    config: isRecord(source.config) ? source.config : {},
+    enabled: source.enabled !== false,
+    secretConfigured: source.secretConfigured === true,
+    secretLast4: typeof source.secretLast4 === 'string' ? source.secretLast4 : undefined,
+    inUseByRuleCount: toNumber(source.inUseByRuleCount, 0),
+    createdAt:
+      typeof source.createdAt === 'string' || source.createdAt instanceof Date
+        ? source.createdAt
+        : undefined,
+    updatedAt:
+      typeof source.updatedAt === 'string' || source.updatedAt instanceof Date
+        ? source.updatedAt
+        : undefined,
+  }
+}
+
+function normalizeAlertRuleDestinationSummary(value: unknown): AlertRuleDestinationSummary {
+  const source = isRecord(value) ? value : {}
+  return {
+    id: typeof source.id === 'string' ? source.id : '',
+    name: typeof source.name === 'string' ? source.name : 'Destination',
+    type: isAlertDestinationType(source.type) ? source.type : 'webhook',
+    enabled: source.enabled !== false,
+  }
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -266,8 +437,24 @@ function normalizeStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string')
 }
 
+function isAlertRuleState(value: unknown): value is AlertRuleState {
+  return value === 'active' || value === 'snoozed' || value === 'disabled'
+}
+
+function normalizeNullableDate(value: unknown): string | Date | null {
+  return typeof value === 'string' || value instanceof Date ? value : null
+}
+
+function computeRuleState(enabled: boolean, mutedUntil: string | Date | null): AlertRuleState {
+  if (!enabled) return 'disabled'
+  if (mutedUntil && new Date(mutedUntil).getTime() > Date.now()) return 'snoozed'
+  return 'active'
+}
+
 function normalizeAlertRule(value: unknown): AlertRuleRecord {
   const source = isRecord(value) ? value : {}
+  const enabled = source.enabled !== false
+  const mutedUntil = normalizeNullableDate(source.mutedUntil)
 
   return {
     id: typeof source.id === 'string' ? source.id : '',
@@ -279,9 +466,11 @@ function normalizeAlertRule(value: unknown): AlertRuleRecord {
     name: typeof source.name === 'string' ? source.name : 'Alert rule',
     type: isAlertRuleType(source.type) ? source.type : 'failure_threshold',
     config: isRecord(source.config) ? source.config : {},
-    enabled: source.enabled !== false,
+    enabled,
     notificationChannels: normalizeNotificationChannels(source.notificationChannels),
     cooldownMinutes: toNumber(source.cooldownMinutes, 30),
+    mutedUntil,
+    state: isAlertRuleState(source.state) ? source.state : computeRuleState(enabled, mutedUntil),
     createdAt:
       typeof source.createdAt === 'string' || source.createdAt instanceof Date
         ? source.createdAt
@@ -318,6 +507,10 @@ function normalizeAlertEvent(value: unknown): AlertEventRecord {
       typeof source.notificationSentAt === 'string' || source.notificationSentAt instanceof Date
         ? source.notificationSentAt
         : null,
+    acknowledgedAt: normalizeNullableDate(source.acknowledgedAt),
+    acknowledgedBy: typeof source.acknowledgedBy === 'string' ? source.acknowledgedBy : null,
+    acknowledgedByName:
+      typeof source.acknowledgedByName === 'string' ? source.acknowledgedByName : null,
     deliveries: normalizeAlertDeliveries(source.deliveries),
   }
 }
@@ -326,7 +519,11 @@ function normalizeAlertDeliveries(value: unknown): AlertDeliveryRecord[] {
   if (!Array.isArray(value)) return []
   return value.flatMap((entry) => {
     if (!isRecord(entry)) return []
-    if (entry.channelType !== 'email' && entry.channelType !== 'linear' && entry.channelType !== 'webhook') {
+    if (
+      entry.channelType !== 'email' &&
+      entry.channelType !== 'linear' &&
+      entry.channelType !== 'webhook'
+    ) {
       return []
     }
     return [
@@ -341,6 +538,7 @@ function normalizeAlertDeliveries(value: unknown): AlertDeliveryRecord[] {
             ? entry.status
             : 'pending',
         target: typeof entry.target === 'string' ? entry.target : '',
+        attemptCount: typeof entry.attemptCount === 'number' ? entry.attemptCount : null,
         externalIdentifier:
           typeof entry.externalIdentifier === 'string' ? entry.externalIdentifier : null,
         externalUrl: typeof entry.externalUrl === 'string' ? entry.externalUrl : null,
@@ -360,6 +558,11 @@ function invalidateAlertQueries(queryClient: QueryClient, connectionId?: string)
   }
 }
 
+/** Open = firing incl. acknowledged; `count` is the legacy key kept for one release. */
+function connectionOpenCount(entry: AlertSummaryConnection): number {
+  return typeof entry.open === 'number' ? entry.open : entry.count
+}
+
 /** Open incident count for one connection, or org-wide when connectionId is omitted. */
 export function getOpenAlertCount(
   connections: AlertSummaryConnection[] | undefined,
@@ -367,9 +570,10 @@ export function getOpenAlertCount(
 ): number {
   const entries = connections ?? []
   if (connectionId) {
-    return entries.find((entry) => entry.connectionId === connectionId)?.count ?? 0
+    const entry = entries.find((candidate) => candidate.connectionId === connectionId)
+    return entry ? connectionOpenCount(entry) : 0
   }
-  return entries.reduce((sum, entry) => sum + entry.count, 0)
+  return entries.reduce((sum, entry) => sum + connectionOpenCount(entry), 0)
 }
 
 export function useAlertSummary(options?: { refetchInterval?: number }) {
@@ -388,6 +592,8 @@ export function useGlobalAlertEvents(filters: AlertEventFilterOptions = {}) {
     limit: filters.limit ?? 100,
     offset: filters.offset ?? 0,
     status: filters.status,
+    acknowledged: filters.acknowledged,
+    connectionId: filters.connectionId,
   } satisfies AlertEventFilterOptions
 
   return useQuery({
@@ -398,6 +604,12 @@ export function useGlobalAlertEvents(filters: AlertEventFilterOptions = {}) {
           limit: String(normalizedFilters.limit),
           offset: String(normalizedFilters.offset),
           ...(normalizedFilters.status ? { status: normalizedFilters.status } : {}),
+          ...(normalizedFilters.acknowledged === undefined
+            ? {}
+            : { acknowledged: normalizedFilters.acknowledged ? 'true' : 'false' }),
+          ...(normalizedFilters.connectionId
+            ? { connectionId: normalizedFilters.connectionId }
+            : {}),
         },
       })
       const data = await handleRes<GlobalAlertEventsResponse>(res)
@@ -417,8 +629,12 @@ export function useConnectionAlertRules(connectionId: string | undefined) {
         param: { connectionId: connectionId! },
       })
       const data = await handleRes<ConnectionAlertRulesResponse>(res)
+      const destinations = (data as { destinations?: unknown }).destinations
       return {
         rules: Array.isArray(data.rules) ? data.rules.map(normalizeAlertRule) : [],
+        destinations: Array.isArray(destinations)
+          ? destinations.map(normalizeAlertRuleDestinationSummary)
+          : [],
       }
     },
     enabled: !!connectionId,
@@ -433,8 +649,10 @@ export function useConnectionAlertEvents(
     limit: filters.limit ?? 100,
     offset: filters.offset ?? 0,
     status: filters.status,
+    acknowledged: filters.acknowledged,
     queueName: filters.queueName,
     jobId: filters.jobId,
+    alertRuleId: filters.alertRuleId,
   } satisfies AlertEventFilterOptions
 
   return useQuery({
@@ -446,8 +664,12 @@ export function useConnectionAlertEvents(
           limit: String(normalizedFilters.limit),
           offset: String(normalizedFilters.offset),
           ...(normalizedFilters.status ? { status: normalizedFilters.status } : {}),
+          ...(normalizedFilters.acknowledged === undefined
+            ? {}
+            : { acknowledged: normalizedFilters.acknowledged ? 'true' : 'false' }),
           ...(normalizedFilters.queueName ? { queueName: normalizedFilters.queueName } : {}),
           ...(normalizedFilters.jobId ? { jobId: normalizedFilters.jobId } : {}),
+          ...(normalizedFilters.alertRuleId ? { alertRuleId: normalizedFilters.alertRuleId } : {}),
         },
       })
       const data = await handleRes<ConnectionAlertEventsResponse>(res)
@@ -512,6 +734,37 @@ export function useDeleteAlertRule(connectionId: string | undefined) {
   })
 }
 
+export function useSnoozeAlertRule(connectionId: string | undefined) {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({ ruleId, minutes }: { ruleId: string; minutes: number }) => {
+      const res = await api.c[':connectionId'].alerts.rules[':ruleId'].snooze.$post({
+        param: { connectionId: connectionId!, ruleId },
+        json: { minutes },
+      })
+      const data = await handleRes<SnoozeAlertRuleResponse>(res)
+      return { rule: normalizeAlertRule(data.rule) }
+    },
+    onSuccess: () => invalidateAlertQueries(queryClient, connectionId),
+  })
+}
+
+export function useUnsnoozeAlertRule(connectionId: string | undefined) {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async (ruleId: string) => {
+      const res = await api.c[':connectionId'].alerts.rules[':ruleId'].snooze.$delete({
+        param: { connectionId: connectionId!, ruleId },
+      })
+      const data = await handleRes<UnsnoozeAlertRuleResponse>(res)
+      return { rule: normalizeAlertRule(data.rule) }
+    },
+    onSuccess: () => invalidateAlertQueries(queryClient, connectionId),
+  })
+}
+
 export function useResolveAlertEvent() {
   const queryClient = useQueryClient()
 
@@ -521,6 +774,103 @@ export function useResolveAlertEvent() {
         param: { connectionId, eventId },
       })
       const data = await handleRes<ResolveAlertEventResponse>(res)
+      return { event: normalizeAlertEvent(data.event) }
+    },
+    onSuccess: (_, variables) => invalidateAlertQueries(queryClient, variables.connectionId),
+  })
+}
+
+/** Resolve an event via the org-scoped endpoint (cross-connection feeds). */
+export function useResolveGlobalAlertEvent() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({ eventId }: { eventId: string; connectionId?: string }) => {
+      const res = await api.alerts.events[':eventId'].resolve.$post({
+        param: { eventId },
+      })
+      const data = await handleRes<ResolveGlobalAlertEventResponse>(res)
+      return { event: normalizeAlertEvent(data.event) }
+    },
+    onSuccess: (_, variables) => invalidateAlertQueries(queryClient, variables.connectionId),
+  })
+}
+
+export function useBulkResolveAlertEvents() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      connectionId,
+      eventIds,
+    }: {
+      connectionId: string
+      eventIds: string[]
+    }) => {
+      const res = await api.c[':connectionId'].alerts.events['resolve-bulk'].$post({
+        param: { connectionId },
+        json: { eventIds },
+      })
+      const data = await handleRes<BulkResolveAlertEventsResponse>(res)
+      return {
+        resolvedCount: typeof data.resolvedCount === 'number' ? data.resolvedCount : 0,
+        events: Array.isArray(data.events) ? data.events.map(normalizeAlertEvent) : [],
+      }
+    },
+    onSuccess: (_, variables) => invalidateAlertQueries(queryClient, variables.connectionId),
+  })
+}
+
+/** Acknowledge an event via the org-scoped endpoint (cross-connection feeds). */
+export function useAcknowledgeGlobalAlertEvent() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({ eventId }: { eventId: string; connectionId?: string }) => {
+      const res = await api.alerts.events[':eventId'].acknowledge.$post({
+        param: { eventId },
+      })
+      const data = await handleRes<AcknowledgeGlobalAlertEventResponse>(res)
+      return { event: normalizeAlertEvent(data.event) }
+    },
+    onSuccess: (_, variables) => invalidateAlertQueries(queryClient, variables.connectionId),
+  })
+}
+
+export function useAcknowledgeAlertEvent(connectionId: string | undefined) {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async (eventId: string) => {
+      const res = await api.c[':connectionId'].alerts.events[':eventId'].acknowledge.$post({
+        param: { connectionId: connectionId!, eventId },
+      })
+      const data = await handleRes<AcknowledgeAlertEventResponse>(res)
+      return { event: normalizeAlertEvent(data.event) }
+    },
+    onSuccess: () => invalidateAlertQueries(queryClient, connectionId),
+  })
+}
+
+export function useRetryAlertDelivery() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      connectionId,
+      eventId,
+      deliveryId,
+    }: {
+      connectionId: string
+      eventId: string
+      deliveryId: string
+    }) => {
+      const res = await api.c[':connectionId'].alerts.events[':eventId'].deliveries[
+        ':deliveryId'
+      ].retry.$post({
+        param: { connectionId, eventId, deliveryId },
+      })
+      const data = await handleRes<RetryAlertDeliveryResponse>(res)
       return { event: normalizeAlertEvent(data.event) }
     },
     onSuccess: (_, variables) => invalidateAlertQueries(queryClient, variables.connectionId),
@@ -548,6 +898,102 @@ export function useTestWebhook(connectionId: string | undefined) {
         json: input,
       })
       return handleRes<WebhookTestResult>(res)
+    },
+  })
+}
+
+export function useAlertDestinations(options?: { type?: AlertDestinationType }) {
+  const { data: activeOrganization } = useActiveOrganization()
+  const organizationId = activeOrganization?.id
+
+  return useQuery({
+    queryKey: alertKeys.destinations(organizationId, options?.type),
+    queryFn: async () => {
+      const res = await api.alerts.destinations.$get({
+        query: options?.type ? { type: options.type } : {},
+      })
+      const data = await handleRes<AlertDestinationsResponse>(res)
+      return {
+        destinations: Array.isArray(data.destinations)
+          ? data.destinations.map(normalizeAlertDestination)
+          : [],
+      }
+    },
+    enabled: !!organizationId,
+  })
+}
+
+export function useCreateAlertDestination() {
+  const queryClient = useQueryClient()
+  const { data: activeOrganization } = useActiveOrganization()
+  const organizationId = activeOrganization?.id
+
+  return useMutation({
+    mutationFn: async (input: AlertDestinationCreateInput) => {
+      const res = await api.alerts.destinations.$post({ json: input })
+      const data = await handleRes<AlertDestinationResponse>(res)
+      return { destination: normalizeAlertDestination(data.destination) }
+    },
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: alertKeys.destinations(organizationId) }),
+  })
+}
+
+export function useUpdateAlertDestination() {
+  const queryClient = useQueryClient()
+  const { data: activeOrganization } = useActiveOrganization()
+  const organizationId = activeOrganization?.id
+
+  return useMutation({
+    mutationFn: async ({
+      destinationId,
+      input,
+    }: {
+      destinationId: string
+      input: AlertDestinationUpdateInput
+    }) => {
+      const res = await api.alerts.destinations[':destinationId'].$patch({
+        param: { destinationId },
+        json: input,
+      })
+      const data = await handleRes<UpdateAlertDestinationResponse>(res)
+      return { destination: normalizeAlertDestination(data.destination) }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: alertKeys.destinations(organizationId) })
+      queryClient.invalidateQueries({ queryKey: ['alerts', 'connection'] })
+    },
+  })
+}
+
+export function useDeleteAlertDestination() {
+  const queryClient = useQueryClient()
+  const { data: activeOrganization } = useActiveOrganization()
+  const organizationId = activeOrganization?.id
+
+  return useMutation({
+    mutationFn: async (destinationId: string) => {
+      const res = await api.alerts.destinations[':destinationId'].$delete({
+        param: { destinationId },
+      })
+      return handleRes<{ ok: boolean }>(res)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: alertKeys.destinations(organizationId) })
+      queryClient.invalidateQueries({ queryKey: ['alerts', 'connection'] })
+    },
+  })
+}
+
+export function useTestAlertDestination() {
+  return useMutation({
+    mutationFn: async (destinationId: string) => {
+      const res = await api.alerts.destinations[':destinationId'].test.$post({
+        param: { destinationId },
+      })
+      // The response shape differs per destination type; widen to the shared result.
+      const data = await handleRes<TestAlertDestinationResponse>(res)
+      return data as AlertDestinationTestResult
     },
   })
 }

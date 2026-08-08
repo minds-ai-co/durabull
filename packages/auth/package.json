@@ -11,6 +11,10 @@
     "./client": {
       "types": "./src/client.ts",
       "import": "./src/client.ts"
+    },
+    "./mcp-consent": {
+      "types": "./src/mcp-consent.ts",
+      "import": "./src/mcp-consent.ts"
     }
   },
   "scripts": {

@@ -32,14 +32,11 @@ describe('extractBearerToken', () => {
 
 describe('validateMcpAccessTokenClaims', () => {
   it('accepts valid scoped tokens for the canonical resource', () => {
-    const result = validateMcpAccessTokenClaims(
-      baseClaims({ resource: canonicalResourceUri }),
-      {
-        canonicalResourceUri,
-        requiredScopes: [MCP_SCOPE_DISCOVER],
-        requireResourceIndicator: true,
-      }
-    )
+    const result = validateMcpAccessTokenClaims(baseClaims({ resource: canonicalResourceUri }), {
+      canonicalResourceUri,
+      requiredScopes: [MCP_SCOPE_DISCOVER],
+      requireResourceIndicator: true,
+    })
 
     expect(result.ok).toBe(true)
   })
@@ -79,6 +76,18 @@ describe('validateMcpAccessTokenClaims', () => {
     if (!result.ok) {
       expect(result.status).toBe(401)
     }
+  })
+
+  it('accepts equivalent resource URIs with trailing slash differences', () => {
+    const result = validateMcpAccessTokenClaims(
+      baseClaims({ resource: 'https://app.example.com/mcp/' }),
+      {
+        canonicalResourceUri: 'https://app.example.com/mcp',
+        requiredScopes: [MCP_SCOPE_DISCOVER],
+      }
+    )
+
+    expect(result.ok).toBe(true)
   })
 
   it('returns 403 with missing scopes when scope is insufficient', () => {

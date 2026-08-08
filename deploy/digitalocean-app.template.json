@@ -8,10 +8,10 @@
     {
       "name": "durabull",
       "image": {
-        "registry_type": "GHCR",
-        "registry": "durabullhq",
+        "registry_type": "DOCR",
+        "registry": "training",
         "repository": "durabull",
-        "tag": "v1.17.0"
+        "tag": "__DURABULL_IMAGE_TAG__"
       },
       "instance_size_slug": "apps-s-1vcpu-1gb",
       "instance_count": 1,

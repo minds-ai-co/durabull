@@ -1,4 +1,5 @@
-import { AnalyticsEvents, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { zodValidator } from '@tanstack/zod-adapter'
@@ -36,6 +37,7 @@ import { JobRemoveButton } from '@/components/job-remove-button'
 import { JsonViewer } from '@/components/json-viewer'
 import { QueueNameTag } from '@/components/queue-name-tag'
 import { RetryCountdown } from '@/components/retry-countdown'
+import { RetryJobDialog } from '@/components/retry-job-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -45,7 +47,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useConnectionAlertEvents } from '@/hooks/use-alerts'
-import { useJob, useJobLogs, useRemoveJobs, useRetryJobs } from '@/hooks/use-queues'
+import { useJobRetryDialog } from '@/hooks/use-job-retry-dialog'
+import { useJob, useJobLogs, useRemoveJobs } from '@/hooks/use-queues'
 import { cn, formatDate, formatDuration, getTimezoneAbbreviation } from '@/lib/utils'
 
 const jobSearchSchema = z.object({
@@ -57,10 +60,10 @@ const LOG_FORMATTING_DOCS_URL =
 
 const JOB_STATUS_CONFIG: Record<string, { variant: string; color: string }> = {
   waiting: { variant: 'secondary', color: 'text-muted-foreground' },
-  active: { variant: 'default', color: 'text-blue-600 dark:text-blue-400' },
-  delayed: { variant: 'warning', color: 'text-orange-600 dark:text-orange-400' },
-  completed: { variant: 'success', color: 'text-green-600 dark:text-green-400' },
-  failed: { variant: 'destructive', color: 'text-red-600 dark:text-red-400' },
+  active: { variant: 'default', color: 'text-status-active' },
+  delayed: { variant: 'warning', color: 'text-status-delayed' },
+  completed: { variant: 'success', color: 'text-status-success' },
+  failed: { variant: 'destructive', color: 'text-status-danger' },
 }
 
 export const Route = createFileRoute('/$orgSlug/c/$connectionId/queues/$queueName_/jobs/$jobId')({
@@ -74,6 +77,7 @@ function JobDetailPage() {
   const navigate = useNavigate()
   const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false)
   const [invokeDialogOpen, setInvokeDialogOpen] = useState(false)
+  const retryDialog = useJobRetryDialog(queueName, jobId)
 
   const { data: job, isLoading, error } = useJob(queueName, jobId)
   const { data: logsData } = useJobLogs(queueName, jobId)
@@ -83,7 +87,6 @@ function JobDetailPage() {
     limit: 20,
   })
 
-  const retryMutation = useRetryJobs()
   const removeMutation = useRemoveJobs()
 
   // Track job view when job data is loaded
@@ -117,21 +120,6 @@ function JobDetailPage() {
 
   const hasFailedAttempts = (job?.stacktraceCount ?? 0) > 0
   const hasFailed = job?.status === 'failed'
-
-  const handleRetry = useCallback(() => {
-    retryMutation.mutate(
-      { queueName, jobIds: [jobId] },
-      {
-        onSuccess: () => {
-          navigate({
-            to: '/$orgSlug/c/$connectionId/queues/$queueName',
-            params: { orgSlug, connectionId, queueName },
-            search: {},
-          })
-        },
-      }
-    )
-  }, [connectionId, jobId, navigate, orgSlug, queueName, retryMutation])
 
   const isScheduledJob = jobId.startsWith('repeat:')
 
@@ -224,9 +212,8 @@ function JobDetailPage() {
             <Button
               variant="outline"
               size="xs"
-              onClick={handleRetry}
-              disabled={retryMutation.isPending}
-              className="border-green-500/30 text-green-600 hover:bg-green-500/10 hover:text-green-600"
+              onClick={retryDialog.openDialog}
+              className="border-status-success/30 text-status-success hover:bg-status-success/10 hover:text-status-success"
             >
               <RefreshCw className="mr-2 h-4 w-4" />
               Retry Job
@@ -259,7 +246,7 @@ function JobDetailPage() {
       mobileActions: (
         <>
           {job?.status === 'failed' && (
-            <DropdownMenuItem onClick={handleRetry} disabled={retryMutation.isPending}>
+            <DropdownMenuItem onClick={retryDialog.openDialog}>
               <RefreshCw className="mr-2 h-4 w-4" />
               Retry Job
             </DropdownMenuItem>
@@ -300,13 +287,12 @@ function JobDetailPage() {
     [
       connectionId,
       handleRemove,
-      handleRetry,
+      retryDialog.openDialog,
       isLoading,
       job,
       orgSlug,
       queueName,
       removeMutation.isPending,
-      retryMutation.isPending,
       isScheduledJob,
     ]
   )
@@ -535,7 +521,7 @@ function JobDetailPage() {
           {job?.returnvalue != null && (
             <Card className="mt-4">
               <CardHeader>
-                <CardTitle className="text-sm font-medium flex items-center gap-2 text-green-600">
+                <CardTitle className="text-sm font-medium flex items-center gap-2 text-status-success">
                   <Check className="h-4 w-4" />
                   Return Value
                 </CardTitle>
@@ -606,6 +592,17 @@ function JobDetailPage() {
               search: {},
             })
           }}
+        />
+      )}
+
+      {/* Retry Job Dialog - rendered whenever the job exists so it survives
+          the status flipping away from 'failed' once the retry starts */}
+      {job && (
+        <RetryJobDialog
+          queueName={queueName}
+          jobId={job.id}
+          jobName={job.name}
+          retry={retryDialog}
         />
       )}
 
@@ -683,7 +680,7 @@ function ErrorDisplay({ error }: { error: string }) {
               onClick={handleCopy}
             >
               {copied ? (
-                <Check className="h-3.5 w-3.5 text-green-500" />
+                <Check className="h-3.5 w-3.5 text-status-success" />
               ) : (
                 <Copy className="h-3.5 w-3.5" />
               )}
@@ -905,7 +902,7 @@ function LogViewer({ queueName, jobId }: { queueName: string; jobId: string }) {
                   disabled={filteredLogs.length === 0}
                 >
                   {copied ? (
-                    <Check className="h-3.5 w-3.5 text-green-500" />
+                    <Check className="h-3.5 w-3.5 text-status-success" />
                   ) : (
                     <Copy className="h-3.5 w-3.5" />
                   )}
@@ -1322,7 +1319,7 @@ function CopyJobIdButton({ jobId }: { jobId: string }) {
             onClick={handleCopy}
           >
             {copied ? (
-              <Check className="h-3.5 w-3.5 text-green-500" />
+              <Check className="h-3.5 w-3.5 text-status-success" />
             ) : (
               <Copy className="h-3.5 w-3.5" />
             )}

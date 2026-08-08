@@ -5,12 +5,15 @@ import {
   alertRuleRepository,
   redisConnectionRepository,
   redisDiscoveredQueueRepository,
+  type AlertDelivery,
+  type AlertEvent,
   type AlertRule,
   type RedisConnection,
 } from '@durabull/dal'
 import { env } from '@durabull/env'
 import type { JobType } from 'bullmq'
 import { evaluateRule, type CursorState, type QueueSnapshot } from './alert-evaluator'
+import { syncLinearIssuesForResolvedEvents } from './alert-resolution'
 import {
   dispatchAlertNotification,
   processAlertDeliveries,
@@ -20,6 +23,7 @@ import { getQueue } from './redis'
 import { toRedisConnectionOptions } from './connection-options'
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000
+const DEFAULT_DELIVERY_SWEEP_INTERVAL_MS = 15_000
 const MAX_STARTUP_JITTER_MS = 30_000
 const CONNECTION_TIMEOUT_MS = 30_000
 const MAX_CONCURRENT_CONNECTIONS = 3
@@ -29,15 +33,35 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 const EVENT_RETENTION_DAYS = 90
 const DEFAULT_JOB_FAILED_MAX_ISSUES_PER_POLL = 100
 const HARD_CAP_JOB_FAILED_MAX_ISSUES_PER_POLL = 500
+const DELIVERY_SWEEP_LIMIT = 10
+const MAX_CONCURRENT_DELIVERY_SWEEPS = 10
+const DELIVERY_SWEEP_BUDGET_MS = 20_000
+const DEFAULT_JOB_AUTO_RESOLVE_INTERVAL_MS = 5 * 60_000
+const JOB_AUTO_RESOLVE_BATCH_LIMIT = 500
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let deliverySweepTimer: ReturnType<typeof setInterval> | null = null
 let cleanupTimer: ReturnType<typeof setInterval> | null = null
+let jobAutoResolveTimer: ReturnType<typeof setInterval> | null = null
 let startupTimer: ReturnType<typeof setTimeout> | null = null
 let isRunning = false
 let pollInProgress = false
+let deliverySweepInProgress = false
+let jobAutoResolveInProgress = false
 
 function getPollIntervalMs(): number {
   return Math.max(5_000, env.DURABULL_ALERT_POLL_INTERVAL_MS ?? DEFAULT_POLL_INTERVAL_MS)
+}
+
+function getDeliverySweepIntervalMs(): number {
+  return Math.max(5_000, Math.min(getPollIntervalMs(), DEFAULT_DELIVERY_SWEEP_INTERVAL_MS))
+}
+
+function getJobAutoResolveIntervalMs(): number {
+  return Math.max(
+    30_000,
+    env.DURABULL_ALERT_JOB_RESOLVE_INTERVAL_MS ?? DEFAULT_JOB_AUTO_RESOLVE_INTERVAL_MS
+  )
 }
 
 function isAlertMonitorEnabled(): boolean {
@@ -136,16 +160,24 @@ export function startAlertMonitor(): void {
 
   isRunning = true
   const pollIntervalMs = getPollIntervalMs()
+  const deliverySweepIntervalMs = getDeliverySweepIntervalMs()
   const jitter = Math.floor(Math.random() * MAX_STARTUP_JITTER_MS)
   console.log(
-    `[alert-monitor] Starting in ${(jitter / 1000).toFixed(0)}s, poll interval ${Math.round(pollIntervalMs / 1000)}s`
+    `[alert-monitor] Starting in ${(jitter / 1000).toFixed(0)}s, poll interval ${Math.round(pollIntervalMs / 1000)}s, delivery sweep interval ${Math.round(deliverySweepIntervalMs / 1000)}s`
   )
 
   startupTimer = setTimeout(() => {
     void runPollCycle()
+    void runDeliverySweepCycle()
     void runCleanup()
+    void runJobAutoResolveCycle()
     pollTimer = setInterval(() => void runPollCycle(), pollIntervalMs)
+    deliverySweepTimer = setInterval(() => void runDeliverySweepCycle(), deliverySweepIntervalMs)
     cleanupTimer = setInterval(() => void runCleanup(), CLEANUP_INTERVAL_MS)
+    jobAutoResolveTimer = setInterval(
+      () => void runJobAutoResolveCycle(),
+      getJobAutoResolveIntervalMs()
+    )
   }, jitter)
 }
 
@@ -158,9 +190,17 @@ export function stopAlertMonitor(): void {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  if (deliverySweepTimer) {
+    clearInterval(deliverySweepTimer)
+    deliverySweepTimer = null
+  }
   if (cleanupTimer) {
     clearInterval(cleanupTimer)
     cleanupTimer = null
+  }
+  if (jobAutoResolveTimer) {
+    clearInterval(jobAutoResolveTimer)
+    jobAutoResolveTimer = null
   }
   isRunning = false
   console.log('[alert-monitor] Stopped.')
@@ -171,32 +211,137 @@ async function runPollCycle(): Promise<void> {
   pollInProgress = true
 
   try {
-    const rules = await alertRuleRepository.findAllEnabled()
-    if (rules.length === 0) return
-
-    const rulesByConnection = new Map<string, AlertRule[]>()
-    for (const rule of rules) {
-      const existing = rulesByConnection.get(rule.connectionId) ?? []
-      existing.push(rule)
-      rulesByConnection.set(rule.connectionId, existing)
-    }
-
-    await processWithConcurrency(
-      Array.from(rulesByConnection.entries()),
-      MAX_CONCURRENT_CONNECTIONS,
-      async ([connectionId, connectionRules]) => {
-        await withTimeout(
-          processConnection(connectionId, connectionRules),
-          CONNECTION_TIMEOUT_MS,
-          `Connection ${connectionId}`
-        )
+    // Skips disabled rules and rules snoozed via mutedUntil; snoozed rules
+    // resume automatically on the first poll after the timestamp passes.
+    const rules = await alertRuleRepository.findAllActive()
+    if (rules.length > 0) {
+      const rulesByConnection = new Map<string, AlertRule[]>()
+      for (const rule of rules) {
+        const existing = rulesByConnection.get(rule.connectionId) ?? []
+        existing.push(rule)
+        rulesByConnection.set(rule.connectionId, existing)
       }
-    )
+
+      await processWithConcurrency(
+        Array.from(rulesByConnection.entries()),
+        MAX_CONCURRENT_CONNECTIONS,
+        async ([connectionId, connectionRules]) => {
+          await withTimeout(
+            processConnection(connectionId, connectionRules),
+            CONNECTION_TIMEOUT_MS,
+            `Connection ${connectionId}`
+          )
+        }
+      )
+    }
   } catch (error) {
     console.error('[alert-monitor] Poll cycle failed:', error)
   } finally {
     pollInProgress = false
   }
+}
+
+async function runDeliverySweepCycle(): Promise<void> {
+  if (deliverySweepInProgress) return
+  deliverySweepInProgress = true
+  try {
+    await processDueAlertDeliveries()
+  } catch (error) {
+    console.error('[alert-monitor] Delivery sweep cycle failed:', error)
+  } finally {
+    deliverySweepInProgress = false
+  }
+}
+
+async function processDueAlertDeliveries(): Promise<void> {
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < DELIVERY_SWEEP_BUDGET_MS) {
+    const deliveries = await alertDeliveryRepository.claimDue(DELIVERY_SWEEP_LIMIT)
+    if (deliveries.length === 0) return
+
+    await processWithConcurrency(
+      deliveries,
+      MAX_CONCURRENT_DELIVERY_SWEEPS,
+      processDueAlertDelivery
+    )
+    if (deliveries.length < DELIVERY_SWEEP_LIMIT) return
+  }
+}
+
+async function processDueAlertDelivery(delivery: AlertDelivery): Promise<void> {
+  try {
+    const event = await alertEventRepository.findById(
+      delivery.alertEventId,
+      delivery.organizationId
+    )
+    if (!event) {
+      await markDeliveryFailedWithoutRetry(delivery, 'Alert event no longer exists.')
+      return
+    }
+
+    const rule = await alertRuleRepository.findById(event.alertRuleId, event.organizationId)
+    if (!rule) {
+      await markDeliveryFailedWithoutRetry(delivery, 'Alert rule no longer exists.')
+      return
+    }
+
+    const connection = await redisConnectionRepository.findByIdUnsafe(event.connectionId)
+    if (!connection) {
+      await markDeliveryFailedWithoutRetry(delivery, 'Redis connection no longer exists.')
+      return
+    }
+
+    await processAlertDeliveries(event, connection, rule.name, {
+      claimedDeliveries: [delivery],
+    })
+    await markLegacyNotificationSentIfComplete(event.id)
+  } catch (error) {
+    console.error('[alert-monitor] Due delivery sweep failed:', {
+      deliveryId: delivery.id,
+      alertEventId: delivery.alertEventId,
+      error,
+    })
+    await markDeliveryFailedForRetry(
+      delivery,
+      error instanceof Error ? error.message : 'Due delivery sweep failed.'
+    )
+  }
+}
+
+async function markDeliveryFailedWithoutRetry(
+  delivery: AlertDelivery,
+  error: string
+): Promise<void> {
+  if (!(delivery.claimedAt instanceof Date)) {
+    console.error(
+      '[alert-monitor] Claimed delivery is missing claimedAt; cannot mark non-retryable.',
+      {
+        deliveryId: delivery.id,
+      }
+    )
+    return
+  }
+  await alertDeliveryRepository.markFailed(delivery.id, {
+    error,
+    retryable: false,
+    expectedClaimedAt: delivery.claimedAt,
+  })
+}
+
+async function markDeliveryFailedForRetry(delivery: AlertDelivery, error: string): Promise<void> {
+  if (!(delivery.claimedAt instanceof Date)) {
+    console.error('[alert-monitor] Claimed delivery is missing claimedAt; cannot mark retryable.', {
+      deliveryId: delivery.id,
+    })
+    return
+  }
+  await alertDeliveryRepository.markFailed(delivery.id, {
+    error,
+    retryable: true,
+    nextRetryAt: new Date(Date.now() + 30_000),
+    expectedClaimedAt: delivery.claimedAt,
+  })
 }
 
 async function processConnection(connectionId: string, rules: AlertRule[]): Promise<void> {
@@ -295,7 +440,12 @@ async function evaluateAndMaybeAlert(
   if (!evaluation.triggered) {
     const activeEvent = await alertEventRepository.findActiveFiring(rule.id, snapshot.queueName)
     if (activeEvent) {
-      await alertEventRepository.resolve(activeEvent.id, rule.organizationId)
+      const resolvedEvent = await alertEventRepository.resolve(activeEvent.id, rule.organizationId)
+      if (resolvedEvent) {
+        await syncLinearIssuesForResolvedEvents([resolvedEvent], {
+          kind: 'auto_condition_cleared',
+        })
+      }
     }
     return
   }
@@ -311,11 +461,28 @@ async function evaluateAndMaybeAlert(
     return
   }
 
-  const recentEvent = await alertEventRepository.findMostRecentForRule(rule.id, snapshot.queueName)
+  // Cooldown anchors to the most recent non-suppressed event; anchoring to
+  // suppressed events would extend the window on every suppression.
+  const recentEvent = await alertEventRepository.findMostRecentFiredForRule(
+    rule.id,
+    snapshot.queueName
+  )
   if (recentEvent) {
     const cooldownMs = rule.cooldownMinutes * 60_000
     const elapsedMs = Date.now() - recentEvent.firedAt.getTime()
     if (elapsedMs < cooldownMs) {
+      // Record the suppression so it is visible in the incident history.
+      // Coalesced to one event per cooldown window; never dispatches.
+      await alertEventRepository.upsertSuppressed({
+        alertRuleId: rule.id,
+        organizationId: rule.organizationId,
+        connectionId: rule.connectionId,
+        queueName: snapshot.queueName,
+        type: rule.type,
+        summary: evaluation.summary,
+        context: (evaluation.context ?? {}) as Record<string, unknown>,
+        dedupeKey: `suppressed:${recentEvent.id}`,
+      })
       console.log(
         `[alert-monitor] Suppressed alert for rule "${rule.name}" on ${snapshot.queueName}`
       )
@@ -457,6 +624,90 @@ async function markLegacyNotificationSentIfComplete(eventId: string): Promise<vo
   }
 }
 
+async function runJobAutoResolveCycle(): Promise<void> {
+  if (jobAutoResolveInProgress) return
+  jobAutoResolveInProgress = true
+
+  try {
+    const events = await alertEventRepository.findFiringJobEvents({
+      limit: JOB_AUTO_RESOLVE_BATCH_LIMIT,
+    })
+    if (events.length === 0) return
+
+    const eventsByConnection = new Map<string, AlertEvent[]>()
+    for (const event of events) {
+      const existing = eventsByConnection.get(event.connectionId) ?? []
+      existing.push(event)
+      eventsByConnection.set(event.connectionId, existing)
+    }
+
+    const resolvedEvents: AlertEvent[] = []
+    await processWithConcurrency(
+      Array.from(eventsByConnection.entries()),
+      MAX_CONCURRENT_CONNECTIONS,
+      async ([connectionId, connectionEvents]) => {
+        try {
+          const resolved = await withTimeout(
+            autoResolveCompletedJobEvents(connectionId, connectionEvents),
+            CONNECTION_TIMEOUT_MS,
+            `Job auto-resolve for connection ${connectionId}`
+          )
+          resolvedEvents.push(...resolved)
+        } catch (error) {
+          console.error(`[alert-monitor] Job auto-resolve failed for ${connectionId}:`, error)
+        }
+      }
+    )
+
+    if (resolvedEvents.length > 0) {
+      console.log(
+        `[alert-monitor] Auto-resolved ${resolvedEvents.length} alert(s) whose jobs completed`
+      )
+      await syncLinearIssuesForResolvedEvents(resolvedEvents, { kind: 'auto_job_completed' })
+    }
+  } catch (error) {
+    console.error('[alert-monitor] Job auto-resolve cycle failed:', error)
+  } finally {
+    jobAutoResolveInProgress = false
+  }
+}
+
+async function autoResolveCompletedJobEvents(
+  connectionId: string,
+  events: AlertEvent[]
+): Promise<AlertEvent[]> {
+  const connection = await redisConnectionRepository.findByIdUnsafe(connectionId)
+  if (!connection) return []
+
+  const resolved: AlertEvent[] = []
+  for (const event of events) {
+    const jobId = getEventJobId(event.context)
+    if (!jobId) continue
+
+    const queue = await getQueue(
+      connectionId,
+      connection.url,
+      event.queueName,
+      connection.prefix,
+      toRedisConnectionOptions(connection.allowSelfSignedCerts)
+    )
+
+    const state = await queue.getJobState(jobId)
+    if (state !== 'completed') continue
+
+    const resolvedEvent = await alertEventRepository.resolve(event.id, event.organizationId)
+    if (resolvedEvent) resolved.push(resolvedEvent)
+  }
+
+  return resolved
+}
+
+function getEventJobId(context: unknown): string | null {
+  const source =
+    typeof context === 'object' && context !== null ? (context as Record<string, unknown>) : {}
+  return typeof source.jobId === 'string' && source.jobId.length > 0 ? source.jobId : null
+}
+
 async function runCleanup(): Promise<void> {
   try {
     const deleted = await alertEventRepository.deleteOlderThan(EVENT_RETENTION_DAYS)
@@ -494,5 +745,9 @@ export const __alertMonitorTestUtils = {
   scanFailedJobsAndMaybeAlert,
   normalizeFailedJob,
   processConnection,
+  processDueAlertDeliveries,
   processWithConcurrency,
+  runJobAutoResolveCycle,
+  autoResolveCompletedJobEvents,
+  getEventJobId,
 }

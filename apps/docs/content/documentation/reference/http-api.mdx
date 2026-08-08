@@ -96,6 +96,11 @@ aggregate buckets. It does not include Redis URLs, queue names, Redis key names,
 emails, names, organizations, hostnames, raw URLs, search patterns, stack traces, or raw error
 messages.
 
+Telemetry endpoints return `202` after a sanitized event or batch is accepted into the bounded
+background queue. If the queue is full, the endpoint returns `503` and the API emits a stdout
+`telemetry_queue` signal with `signal: "queue_dropped"` and the operational queue name. That signal
+contains only queue depth counters and does not include product event properties.
+
 ## Connection Management
 
 - `GET /api/connections`

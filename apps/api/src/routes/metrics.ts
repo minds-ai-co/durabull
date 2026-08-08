@@ -62,7 +62,12 @@ const app = new Hono()
       MAX_PAGE_SIZE
     )
 
-    const allQueueNames = await discoverQueues(connectionId, connectionUrl, connectionPrefix, redisOptions)
+    const allQueueNames = await discoverQueues(
+      connectionId,
+      connectionUrl,
+      connectionPrefix,
+      redisOptions
+    )
     const total = allQueueNames.length
 
     // Paginate the queue names BEFORE fetching metrics
@@ -80,7 +85,13 @@ const app = new Hono()
 
     const metrics = await Promise.all(
       paginatedQueueNames.map(async (queueName) => {
-        const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+        const queue = await getQueue(
+          connectionId,
+          connectionUrl,
+          queueName,
+          connectionPrefix,
+          redisOptions
+        )
         const nativeMetrics = await collectQueueNativeMetrics(queue, {
           queueName,
           start: 0,

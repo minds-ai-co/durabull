@@ -1,4 +1,5 @@
-import { AnalyticsEvents, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { useNavigate } from '@tanstack/react-router'
 import { ChevronsUpDown, LogOut, Monitor, Moon, Settings, Sun } from 'lucide-react'
 import { useTheme } from '@/components/theme-provider'
@@ -23,13 +24,14 @@ interface NavUserProps {
     email: string
     avatar: string
   }
+  settingsPath?: string
 }
 
 /**
  * User avatar dropdown in the navigation sidebar
  * Provides access to settings, theme toggle, and logout
  */
-export function NavUser({ user }: NavUserProps) {
+export function NavUser({ user, settingsPath = '/settings' }: NavUserProps) {
   const { theme, setTheme } = useTheme()
   const { signOut } = useAuth()
   const navigate = useNavigate()
@@ -55,7 +57,7 @@ export function NavUser({ user }: NavUserProps) {
         <div className="flex items-center gap-2 px-2 py-2 text-left text-sm transition-all">
           <Avatar className="h-7 w-7 rounded-md border">
             <AvatarImage src={user.avatar} alt={user.name} />
-            <AvatarFallback className="rounded-md bg-gradient-to-br from-indigo-500 to-purple-600 text-white">
+            <AvatarFallback className="rounded-md border bg-secondary font-mono text-xs font-medium text-secondary-foreground">
               {initials}
             </AvatarFallback>
           </Avatar>
@@ -71,7 +73,7 @@ export function NavUser({ user }: NavUserProps) {
           <div className="flex items-center gap-2 px-2 py-2 text-left text-sm">
             <Avatar className="h-7 w-7 rounded-md">
               <AvatarImage src={user.avatar} alt={user.name} />
-              <AvatarFallback className="rounded-md bg-gradient-to-br from-indigo-500 to-purple-600 text-white">
+              <AvatarFallback className="rounded-md border bg-secondary font-mono text-xs font-medium text-secondary-foreground">
                 {initials}
               </AvatarFallback>
             </Avatar>
@@ -85,7 +87,7 @@ export function NavUser({ user }: NavUserProps) {
         <DropdownMenuGroup>
           <DropdownMenuItem
             className="cursor-pointer"
-            onClick={() => navigate({ to: '/settings' })}
+            onClick={() => navigate({ to: settingsPath })}
           >
             <Settings className="mr-2 h-4 w-4 text-muted-foreground" />
             Settings

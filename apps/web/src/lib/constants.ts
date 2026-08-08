@@ -50,6 +50,8 @@ export type QueueStatus = (typeof QUEUE_STATUS)[keyof typeof QUEUE_STATUS]
 export const PAGINATION = {
   /** Default page size for job lists */
   DEFAULT_PAGE_SIZE: 20,
+  /** Page size for the queues list */
+  QUEUES_PAGE_SIZE: 50,
   /** Page size for log entries */
   LOGS_PAGE_SIZE: 50,
   /** Page size for stacktraces (smaller due to large content) */

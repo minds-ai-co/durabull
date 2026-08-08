@@ -1,4 +1,5 @@
-import { AnalyticsEvents, DialogType, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents, AnalyticsProperties, DialogType } from '@durabull/analytics/events'
 import { useNavigate, useParams } from '@tanstack/react-router'
 import { AlertCircle, Building2, Check, ChevronsUpDown, Loader2, Plus, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -47,12 +48,12 @@ function getOrgInitials(name: string): string {
  */
 function getOrgColor(name: string): string {
   const colors = [
-    'from-violet-500 to-purple-600',
-    'from-blue-500 to-indigo-600',
-    'from-emerald-500 to-teal-600',
-    'from-amber-500 to-orange-600',
-    'from-rose-500 to-pink-600',
-    'from-cyan-500 to-blue-600',
+    'bg-status-priority/15 text-status-priority',
+    'bg-status-active/15 text-status-active',
+    'bg-status-success/15 text-status-success',
+    'bg-status-warning/15 text-status-warning',
+    'bg-status-delayed/15 text-status-delayed',
+    'bg-signal/15 text-signal',
   ]
   const hash = name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0)
   return colors[hash % colors.length]
@@ -84,7 +85,7 @@ function OrganizationAvatar({ organization, size = 'md', className }: Organizati
   return (
     <div
       className={cn(
-        'flex items-center justify-center rounded-md bg-linear-to-br font-semibold text-white',
+        'flex items-center justify-center rounded-md border border-border/60 font-mono font-medium',
         sizeClasses[size],
         getOrgColor(organization.name),
         className
@@ -222,11 +223,11 @@ function CreateOrganizationDialog({
       onOpenChange={(newOpen) => {
         if (newOpen) {
           trackEvent(AnalyticsEvents.DIALOG_OPENED, {
-            dialog_type: DialogType.CREATE_ORGANIZATION,
+            [AnalyticsProperties.DIALOG_TYPE]: DialogType.CREATE_ORGANIZATION,
           })
         } else {
           trackEvent(AnalyticsEvents.DIALOG_CLOSED, {
-            dialog_type: DialogType.CREATE_ORGANIZATION,
+            [AnalyticsProperties.DIALOG_TYPE]: DialogType.CREATE_ORGANIZATION,
           })
         }
         onOpenChange(newOpen)
@@ -274,7 +275,8 @@ function CreateOrganizationDialog({
                 disabled={isSubmitting}
                 className={cn(
                   'pr-10',
-                  slugAvailable === true && 'border-green-500 focus-visible:ring-green-500',
+                  slugAvailable === true &&
+                    'border-status-success/30 focus-visible:ring-status-success',
                   slugAvailable === false && 'border-destructive focus-visible:ring-destructive'
                 )}
               />
@@ -283,7 +285,7 @@ function CreateOrganizationDialog({
                   <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
                 )}
                 {!isCheckingSlug && slugAvailable === true && (
-                  <Check className="h-4 w-4 text-green-500" />
+                  <Check className="h-4 w-4 text-status-success" />
                 )}
                 {!isCheckingSlug && slugAvailable === false && (
                   <X className="h-4 w-4 text-destructive" />

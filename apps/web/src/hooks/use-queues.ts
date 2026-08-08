@@ -3,7 +3,8 @@
  * Types are inferred from the server via InferResponseType
  */
 
-import { AnalyticsEvents, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
 import { useConnection } from '@/components/connection-provider'
@@ -202,8 +203,34 @@ export type {
  * Query key factory for queue-related queries
  * Includes connection ID for proper cache isolation
  */
+export const QUEUE_SORT_FIELDS = [
+  'name',
+  'status',
+  'waiting',
+  'prioritized',
+  'active',
+  'delayed',
+  'completed',
+  'failed',
+] as const
+export type QueueSortField = (typeof QUEUE_SORT_FIELDS)[number]
+export type QueueSortOrder = 'asc' | 'desc'
+export type QueueStatusFilter = 'active' | 'paused'
+
+export interface UseQueuesOptions {
+  page?: number
+  pageSize?: number
+  sortBy?: QueueSortField
+  sortOrder?: QueueSortOrder
+  search?: string
+  status?: QueueStatusFilter
+}
+
 export const queryKeys = {
-  queues: (connectionId: string) => ['queues', connectionId] as const,
+  queues: (connectionId: string, options?: UseQueuesOptions) =>
+    options && Object.values(options).some((value) => value !== undefined)
+      ? (['queues', connectionId, options] as const)
+      : (['queues', connectionId] as const),
   queueDiscovery: (connectionId: string) => ['queues', connectionId, 'discovery'] as const,
   queue: (connectionId: string, name: string) => ['queue', connectionId, name] as const,
   queueMetrics: (connectionId: string, name: string, options?: QueueMetricsOptions) =>
@@ -211,12 +238,14 @@ export const queryKeys = {
   jobs: (
     connectionId: string,
     queueName: string,
-    filters?: { status?: string; name?: string; jobId?: string; pageSize?: number }
+    filters?: { status?: string; name?: string; jobId?: string; data?: string; pageSize?: number }
   ) => ['jobs', connectionId, queueName, filters] as const,
   job: (connectionId: string, queueName: string, jobId: string) =>
     ['job', connectionId, queueName, jobId] as const,
   jobLogs: (connectionId: string, queueName: string, jobId: string) =>
     ['job', connectionId, queueName, jobId, 'logs'] as const,
+  jobLogTail: (connectionId: string, queueName: string, jobId: string, start: number) =>
+    ['job', connectionId, queueName, jobId, 'logs', 'tail', start] as const,
   jobStacktraces: (connectionId: string, queueName: string, jobId: string) =>
     ['job', connectionId, queueName, jobId, 'stacktraces'] as const,
   scheduledJobs: (connectionId: string) => ['scheduledJobs', connectionId] as const,
@@ -228,28 +257,38 @@ export const queryKeys = {
   allWorkers: (connectionId: string) => ['workers', connectionId] as const,
 }
 
-function useConnectionIdFromContextOrRoute(): string | undefined {
+export function useConnectionIdFromContextOrRoute(): string | undefined {
   const { currentConnection } = useConnection()
   const { connectionId } = useParams({ strict: false }) as { connectionId?: string }
   return currentConnection?.id ?? connectionId
 }
 
 // Queue Queries
-export function useQueues() {
+export function useQueues(options?: UseQueuesOptions) {
   const connectionId = useConnectionIdFromContextOrRoute()
+  const { page, pageSize, sortBy, sortOrder, search, status } = options ?? {}
 
   return useQuery({
-    queryKey: queryKeys.queues(connectionId ?? ''),
+    queryKey: queryKeys.queues(connectionId ?? '', options),
     queryFn: async () => {
-      const res = await api.c[':connectionId'].queues.$get({
-        param: { connectionId: connectionId! },
-      })
-      return handleRes<ListQueuesResponse>(res)
+      const params = new URLSearchParams()
+      if (page !== undefined) params.set('page', String(page))
+      if (pageSize !== undefined) params.set('pageSize', String(pageSize))
+      if (sortBy !== undefined) params.set('sortBy', sortBy)
+      if (sortOrder !== undefined) params.set('sortOrder', sortOrder)
+      if (search) params.set('search', search)
+      if (status !== undefined) params.set('status', status)
+      const query = params.toString()
+
+      return fetchApi<ListQueuesResponse>(
+        `/api/c/${connectionId}/queues${query ? `?${query}` : ''}`
+      )
     },
     refetchInterval: (query) => {
       const hasPendingDiscoveryRows = (query.state.data?.discovery?.indexed.pending ?? 0) > 0
       return query.state.data?.discovery?.running || hasPendingDiscoveryRows ? 2000 : 10_000
     },
+    placeholderData: (previousData) => previousData,
     enabled: !!connectionId,
   })
 }
@@ -347,7 +386,7 @@ export function useQueueMetrics(queueName: string, options?: QueueMetricsOptions
 // Job Queries - uses fetchApi since route doesn't have zValidator for query params
 export function useJobs(
   queueName: string,
-  filters?: { status?: string; name?: string; jobId?: string; pageSize?: number }
+  filters?: { status?: string; name?: string; jobId?: string; data?: string; pageSize?: number }
 ) {
   const connectionId = useConnectionIdFromContextOrRoute()
 
@@ -358,6 +397,7 @@ export function useJobs(
       if (filters?.status) params.set('status', filters.status)
       if (filters?.name) params.set('name', filters.name)
       if (filters?.jobId) params.set('jobId', filters.jobId)
+      if (filters?.data) params.set('data', filters.data)
       if (filters?.pageSize) params.set('pageSize', filters.pageSize.toString())
       if (pageParam) params.set('cursor', pageParam)
       const query = params.toString()
@@ -400,7 +440,37 @@ export function useJobs(
   })
 }
 
-export function useJob(queueName: string, jobId: string) {
+interface UsePollingQueryOptions {
+  enabled?: boolean
+  refetchInterval?: number | false
+}
+
+export interface JobLogTailResponse {
+  logs: string[]
+  count: number
+  start: number
+  hasMore: boolean
+}
+
+export async function fetchJobLogTail({
+  connectionId,
+  queueName,
+  jobId,
+  start,
+}: {
+  connectionId: string
+  queueName: string
+  jobId: string
+  start: number
+}) {
+  const params = new URLSearchParams()
+  params.set('start', String(start))
+
+  const url = `/api/c/${connectionId}/queues/${encodeURIComponent(queueName)}/jobs/${encodeURIComponent(jobId)}/logs?${params}`
+  return fetchApi<JobLogTailResponse>(url)
+}
+
+export function useJob(queueName: string, jobId: string, options?: UsePollingQueryOptions) {
   const connectionId = useConnectionIdFromContextOrRoute()
 
   return useQuery({
@@ -411,7 +481,8 @@ export function useJob(queueName: string, jobId: string) {
       })
       return handleRes<GetJobResponse>(res)
     },
-    enabled: !!queueName && !!jobId && !!connectionId,
+    enabled: !!queueName && !!jobId && !!connectionId && (options?.enabled ?? true),
+    refetchInterval: options?.refetchInterval ?? false,
   })
 }
 
@@ -438,6 +509,31 @@ export function useJobLogs(queueName: string, jobId: string) {
     getNextPageParam: (lastPage) => (lastPage.hasMore ? lastPage.page + 1 : undefined),
     initialPageParam: 1,
     enabled: !!queueName && !!jobId && !!connectionId,
+  })
+}
+
+export function useJobLogTail(
+  queueName: string,
+  jobId: string,
+  start: number | null,
+  options?: UsePollingQueryOptions
+) {
+  const connectionId = useConnectionIdFromContextOrRoute()
+  const enabled =
+    start != null && !!queueName && !!jobId && !!connectionId && (options?.enabled ?? true)
+
+  return useQuery({
+    queryKey: queryKeys.jobLogTail(connectionId ?? '', queueName, jobId, start ?? 0),
+    queryFn: async () => {
+      return fetchJobLogTail({
+        connectionId: connectionId!,
+        queueName,
+        jobId,
+        start: start ?? 0,
+      })
+    },
+    enabled,
+    refetchInterval: options?.refetchInterval ?? false,
   })
 }
 

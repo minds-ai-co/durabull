@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  alertDeliveryRepository,
   type AlertRule,
   alertCheckCursorRepository,
   alertEventRepository,
@@ -16,6 +17,15 @@ import {
 } from '@durabull/dal'
 import { env } from '@durabull/env'
 import type { CursorState, QueueSnapshot } from './alert-evaluator'
+import * as alertNotifierModule from './alert-notifier'
+import * as redisModule from './redis'
+
+// `mock.module` is process-global and is NOT reverted by `mock.restore()`, so the
+// notifier/redis mocks below would leak into other test files (e.g. the alerts
+// route tests rely on the real `processAlertDeliveries`). Snapshot the real
+// modules now and reinstall them after every test to keep the suite isolated.
+const realAlertNotifierModule = { ...alertNotifierModule }
+const realRedisModule = { ...redisModule }
 
 const TEST_ORG_ID = 'alert-monitor-org'
 
@@ -49,6 +59,7 @@ function createRule(overrides: Partial<AlertRule> = {}): AlertRule {
     enabled: true,
     notificationChannels: [],
     cooldownMinutes: 30,
+    mutedUntil: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -157,6 +168,9 @@ describe('alert monitor', () => {
   })
 
   afterEach(async () => {
+    mock.restore()
+    mock.module('./alert-notifier', () => realAlertNotifierModule)
+    mock.module('./redis', () => realRedisModule)
     await closeDb()
     mutableEnv.DATABASE_URL = originalDatabaseUrl
     mutableEnv.RESEND_API_KEY = originalResendKey
@@ -392,7 +406,129 @@ describe('alert monitor', () => {
     expect(await listRuleEvents(rule.id)).toHaveLength(1)
   })
 
-  it('suppresses new events while the cooldown window is still active', async () => {
+  it('claims due deliveries and hands them to the notifier with event context', async () => {
+    const processAlertDeliveriesMock = mock(async () => {})
+    mock.module('./alert-notifier', () => ({
+      ...realAlertNotifierModule,
+      processAlertDeliveries: processAlertDeliveriesMock,
+    }))
+    const { __alertMonitorTestUtils } = await loadMonitorModule()
+
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      name: 'Webhook retry',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      notificationChannels: [],
+      cooldownMinutes: 30,
+    })
+    const event = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Retry pending delivery',
+      context: {},
+      firedAt: new Date(),
+    })
+    await alertDeliveryRepository.enqueueMany([
+      {
+        alertEventId: event.id,
+        organizationId: TEST_ORG_ID,
+        channelType: 'webhook',
+        target: 'destination:webhook-destination-id',
+        providerMetadata: {
+          type: 'webhook',
+          destinationId: 'webhook-destination-id',
+          url: 'https://example.com/durabull',
+        },
+      },
+    ])
+
+    await __alertMonitorTestUtils.processDueAlertDeliveries()
+
+    expect(processAlertDeliveriesMock).toHaveBeenCalledTimes(1)
+    expect(processAlertDeliveriesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: event.id }),
+      expect.objectContaining({ id: testConnectionId }),
+      'Webhook retry',
+      {
+        claimedDeliveries: [
+          expect.objectContaining({
+            alertEventId: event.id,
+            channelType: 'webhook',
+            status: 'claimed',
+          }),
+        ],
+      }
+    )
+  })
+
+  it('records a coalesced suppressed event while the cooldown window is active', async () => {
+    const dispatchAlertNotificationMock = mock(async () => {})
+    mock.module('./alert-notifier', () => ({
+      dispatchAlertNotification: dispatchAlertNotificationMock,
+      processAlertDeliveries: mock(async () => {}),
+    }))
+
+    const { __alertMonitorTestUtils } = await loadMonitorModule()
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      name: 'Failure threshold',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      cooldownMinutes: 30,
+      notificationChannels: [{ type: 'email', target: 'ops@example.com' }],
+    })
+
+    const anchor = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'resolved',
+      summary: 'Recent incident',
+      context: {},
+      firedAt: new Date(Date.now() - 5 * 60_000),
+    })
+
+    const cursor = {
+      lastCheckedAt: new Date(Date.now() - 5 * 60_000),
+      lastFailedCount: 0,
+      lastCompletedCount: 100,
+    }
+
+    await __alertMonitorTestUtils.evaluateAndMaybeAlert(
+      rule,
+      createSnapshot(),
+      cursor,
+      createConnection()
+    )
+    await __alertMonitorTestUtils.evaluateAndMaybeAlert(
+      rule,
+      createSnapshot(),
+      cursor,
+      createConnection()
+    )
+
+    const events = await listRuleEvents(rule.id)
+    expect(events).toHaveLength(2)
+
+    const suppressed = events.find((event) => event.status === 'suppressed')
+    expect(suppressed?.dedupeKey).toBe(`suppressed:${anchor.id}`)
+    expect((suppressed?.context as Record<string, unknown>).suppressedCount).toBe(2)
+    expect(suppressed?.notificationSentAt).toBeNull()
+    expect(dispatchAlertNotificationMock).not.toHaveBeenCalled()
+  })
+
+  it('does not let suppressed events extend the cooldown window', async () => {
     const { __alertMonitorTestUtils } = await loadMonitorModule()
     const rule = await alertRuleRepository.create({
       organizationId: TEST_ORG_ID,
@@ -404,16 +540,30 @@ describe('alert monitor', () => {
       cooldownMinutes: 30,
     })
 
-    await alertEventRepository.create({
+    // The last real incident fired 31 minutes ago (outside the 30m cooldown)...
+    const anchor = await alertEventRepository.create({
       alertRuleId: rule.id,
       organizationId: TEST_ORG_ID,
       connectionId: testConnectionId,
       queueName: 'email-send',
       type: rule.type,
       status: 'resolved',
-      summary: 'Recent incident',
+      summary: 'Older incident',
       context: {},
-      firedAt: new Date(Date.now() - 5 * 60_000),
+      firedAt: new Date(Date.now() - 31 * 60_000),
+    })
+
+    // ...and a suppression was recorded moments ago. It must not re-anchor
+    // the cooldown, or the rule would stay silent forever.
+    await alertEventRepository.upsertSuppressed({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      type: rule.type,
+      summary: 'Suppressed during cooldown',
+      context: {},
+      dedupeKey: `suppressed:${anchor.id}`,
     })
 
     await __alertMonitorTestUtils.evaluateAndMaybeAlert(
@@ -427,7 +577,9 @@ describe('alert monitor', () => {
       createConnection()
     )
 
-    expect(await listRuleEvents(rule.id)).toHaveLength(1)
+    const events = await listRuleEvents(rule.id)
+    const firing = events.filter((event) => event.status === 'firing')
+    expect(firing).toHaveLength(1)
   })
 
   it('marks notifications as sent when dispatch succeeds', async () => {
@@ -596,5 +748,113 @@ describe('alert monitor', () => {
       attempts: 3,
     })
     expect(dispatchAlertNotificationMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('auto-resolves firing job events whose job has completed', async () => {
+    const getJobStateMock = mock(async (jobId: string) =>
+      jobId === 'job-1' ? 'completed' : 'failed'
+    )
+    mock.module('./redis', () => ({
+      ...realRedisModule,
+      getQueue: mock(async () => ({ getJobState: getJobStateMock })),
+    }))
+
+    const { __alertMonitorTestUtils } = await loadMonitorModule()
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      name: 'Job failures',
+      type: 'job_failed',
+      config: {},
+      cooldownMinutes: 30,
+    })
+
+    const completedJobEvent = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Job job-1 failed in email-send',
+      context: { jobId: 'job-1' },
+      firedAt: new Date(Date.now() - 10 * 60_000),
+    })
+
+    const stillFailedJobEvent = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Job job-2 failed in email-send',
+      context: { jobId: 'job-2' },
+      firedAt: new Date(Date.now() - 10 * 60_000),
+    })
+
+    const resolved = await __alertMonitorTestUtils.autoResolveCompletedJobEvents(testConnectionId, [
+      completedJobEvent,
+      stillFailedJobEvent,
+    ])
+
+    expect(resolved).toHaveLength(1)
+    expect(resolved[0]?.id).toBe(completedJobEvent.id)
+
+    const events = await listRuleEvents(rule.id)
+    const byId = new Map(events.map((event) => [event.id, event]))
+    expect(byId.get(completedJobEvent.id)?.status).toBe('resolved')
+    expect(byId.get(completedJobEvent.id)?.resolvedAt).toBeInstanceOf(Date)
+    expect(byId.get(stillFailedJobEvent.id)?.status).toBe('firing')
+  })
+
+  it('job auto-resolve cycle only touches firing events that carry a job id', async () => {
+    mock.module('./redis', () => ({
+      ...realRedisModule,
+      getQueue: mock(async () => ({ getJobState: mock(async () => 'completed') })),
+    }))
+
+    const { __alertMonitorTestUtils } = await loadMonitorModule()
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      name: 'Job failures',
+      type: 'job_failed',
+      config: {},
+      cooldownMinutes: 30,
+    })
+
+    const jobEvent = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Job job-1 failed in email-send',
+      context: { jobId: 'job-1' },
+      firedAt: new Date(Date.now() - 10 * 60_000),
+    })
+
+    const aggregateEvent = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: testConnectionId,
+      queueName: 'email-send',
+      type: 'failure_threshold',
+      status: 'firing',
+      summary: 'Failure spike',
+      context: {},
+      firedAt: new Date(Date.now() - 10 * 60_000),
+    })
+
+    await __alertMonitorTestUtils.runJobAutoResolveCycle()
+
+    const events = await listRuleEvents(rule.id)
+    const byId = new Map(events.map((event) => [event.id, event]))
+    expect(byId.get(jobEvent.id)?.status).toBe('resolved')
+    expect(byId.get(aggregateEvent.id)?.status).toBe('firing')
   })
 })

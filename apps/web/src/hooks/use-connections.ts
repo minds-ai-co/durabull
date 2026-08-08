@@ -3,7 +3,8 @@
  * Types are automatically inferred from the server via InferResponseType
  */
 
-import { AnalyticsEvents, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { connectionsQueryKey } from '@/components/connection-provider'
 import { api, handleRes, type InferResponseType } from '@/lib/api'

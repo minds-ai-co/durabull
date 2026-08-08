@@ -25,7 +25,7 @@ export default defineConfig({
   testIgnore: [
     "**/global-setup.ts",
     "**/fixtures/**",
-    ...(isAuthlessE2EMode() ? [] : ["**/authless.spec.ts"]),
+    ...(isAuthlessE2EMode() ? [] : ["**/authless.spec.ts", "**/alerts.spec.ts"]),
   ],
   
   // Run tests serially for stability
@@ -103,6 +103,8 @@ export default defineConfig({
       return {
         ...process.env,
         SKIP_CLEAR_PORT_3001: "1",
+        APP_BASE_URL: "http://localhost:5173",
+        VITE_PUBLIC_APP_URL: "http://localhost:5173",
         DURABULL_REDIS_URL_ENCRYPTION_KEY:
           process.env.DURABULL_REDIS_URL_ENCRYPTION_KEY ?? defaultE2ERedisUrlEncryptionKey,
         PATH: `${prepend}${process.env.PATH ?? ""}`,

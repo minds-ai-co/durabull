@@ -1,9 +1,12 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { cors } from 'hono/cors'
 import type { MiddlewareHandler } from 'hono'
+import type { McpRequestContext } from './request-context'
 
 import { createHostValidationMiddleware } from './middleware/host-validation'
+import type { RegisterReadToolsOptions } from './tools/register-read-tools'
 import { createMcpSessionRegistry } from './transport/session-registry'
 
 export interface CreateMcpRoutesOptions {
@@ -14,10 +17,13 @@ export interface CreateMcpRoutesOptions {
   /** CORS origins for /mcp. */
   corsOrigins: string[]
   /**
-   * Middleware applied after host validation and before body limit.
+   * Middleware applied after host validation and body limit.
    * PR-03: bearer token validation goes here.
    */
   middleware?: MiddlewareHandler[]
+  readTools?: RegisterReadToolsOptions
+  /** Optional request-scoped context resolver used by MCP tool handlers. */
+  requestContextResolver?: (context: Context) => McpRequestContext | undefined
   /** When false, only exact host entries match (recommended for production). */
   allowHostnameWithoutPort?: boolean
 }
@@ -26,6 +32,7 @@ export function createMcpRoutes(options: CreateMcpRoutesOptions): Hono {
   const registry = createMcpSessionRegistry({
     version: options.version,
     allowedHosts: options.allowedHosts,
+    serverOptions: { readTools: options.readTools },
   })
 
   const routes = new Hono()
@@ -54,10 +61,6 @@ export function createMcpRoutes(options: CreateMcpRoutesOptions): Hono {
     })
   )
 
-  for (const middleware of options.middleware ?? []) {
-    routes.use('*', middleware)
-  }
-
   routes.use(
     '*',
     bodyLimit({
@@ -67,8 +70,12 @@ export function createMcpRoutes(options: CreateMcpRoutesOptions): Hono {
     })
   )
 
+  for (const middleware of options.middleware ?? []) {
+    routes.use('*', middleware)
+  }
+
   // GET / POST / DELETE delegated to Streamable HTTP transport (@hono/mcp).
-  routes.all('/', async (c) => registry.handleRequest(c))
+  routes.all('/', async (c) => registry.handleRequest(c, options.requestContextResolver?.(c)))
 
   return routes
 }

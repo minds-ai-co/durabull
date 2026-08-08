@@ -31,12 +31,31 @@ If self-hosting, plan for:
 
 Some teams start in cloud for onboarding speed and move to self-hosted when governance requirements increase.
 
+## MCP (unified deployment)
+
+Durabull ships MCP on the **same origin and process** as the API and web app. There is no separate MCP container or port.
+
+| Deployment | MCP URL |
+| --- | --- |
+| Durabull Cloud | `https://app.durabull.io/mcp` (example) |
+| Self-hosted | `{APP_BASE_URL}/mcp` on your published app port |
+
+Requirements for both modes:
+
+- Set `APP_BASE_URL` to the public origin clients use (required for OAuth resource URI and Host allowlist).
+- Keep `DURABULL_AUTHLESS=false` on internet-facing production.
+
+Post-deploy validation: [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md) (health + PRM on every environment; `mcp:e2e` on staging/local only).
+
+See [MCP Server](/documentation/integrations/mcp-server).
+
 ## Migration Readiness Checklist
 
 - mode and env var parity documented
 - connection source strategy decided (env vs DB)
 - auth mode aligned to security model
 - production backup and rollback plan validated
+- `APP_BASE_URL` matches public ingress used for `/mcp` OAuth resource binding
 
 Screenshot placeholder: architecture comparison chart (cloud vs self-hosted).
 

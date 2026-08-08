@@ -75,6 +75,7 @@ const ALLOWED_PROPERTY_KEYS = new Set([
   'error_category',
   'exclude_bull_keys',
   'filter_status',
+  'instance_key',
   'is_default',
   'job_count',
   'job_status',
@@ -100,6 +101,15 @@ const ALLOWED_PROPERTY_KEYS = new Set([
   'theme',
   'update_reason',
   'visible',
+  'denial_reason_category',
+  'mcp_auth_failure',
+  'mcp_method',
+  'mcp_rate_limit_scope',
+  'principal_type',
+  'response_class',
+  'redaction_count',
+  'scope_count',
+  'tool_name',
 ])
 
 const PUBLIC_TOP_LEVEL_ROUTES = new Set([
@@ -223,6 +233,10 @@ export function sanitizeTelemetryEvent(
 
     if (FORBIDDEN_PROPERTY_KEYS.has(key) || !ALLOWED_PROPERTY_KEYS.has(key)) {
       droppedProperties.push(key)
+      continue
+    }
+
+    if (value === undefined) {
       continue
     }
 

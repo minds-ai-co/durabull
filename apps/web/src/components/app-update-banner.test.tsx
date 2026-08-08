@@ -1,4 +1,4 @@
-import { AnalyticsEvents } from '@durabull/analytics'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,13 +9,9 @@ const mocks = vi.hoisted(() => ({
   useAppVersionCheck: vi.fn(),
 }))
 
-vi.mock('@durabull/analytics', async () => {
-  const actual = await vi.importActual<typeof import('@durabull/analytics')>('@durabull/analytics')
-  return {
-    ...actual,
-    trackEvent: mocks.trackEvent,
-  }
-})
+vi.mock('@durabull/analytics/browser', () => ({
+  trackEvent: mocks.trackEvent,
+}))
 
 vi.mock('@/hooks/use-app-version-check', () => ({
   useAppVersionCheck: mocks.useAppVersionCheck,

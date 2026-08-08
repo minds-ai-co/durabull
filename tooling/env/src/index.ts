@@ -55,6 +55,10 @@ const appBaseUrlSchema = z.preprocess(
   emptyToUndefined,
   z.string().default('http://localhost:5173')
 )
+const emailFromSchema = z.preprocess(
+  emptyToUndefined,
+  z.string().default('Durabull <no-reply@durabull.io>')
+)
 const linearOauthActorSchema = z.preprocess(
   emptyToUndefined,
   z.enum(['user', 'app']).default('user')
@@ -68,11 +72,14 @@ const envSchema = z.object({
   DATABASE_URL: optionalString,
   REDIS_URL: optionalString,
   RESEND_API_KEY: optionalString,
+  EMAIL_FROM: emailFromSchema,
   GOOGLE_OAUTH_CLIENT_ID: optionalString,
   GOOGLE_OAUTH_CLIENT_SECRET: optionalString,
   GITHUB_OAUTH_CLIENT_ID: optionalString,
   GITHUB_OAUTH_CLIENT_SECRET: optionalString,
   DISABLE_RATE_LIMIT: optionalBoolean,
+  /** When true, honor X-Forwarded-For / X-Real-IP / CF-Connecting-IP for rate limiting. Auto-enabled on Durabull Cloud. */
+  TRUST_PROXY: optionalBoolean,
   CI: optionalBoolean,
   ASSET_PRELOAD_MAX_SIZE: optionalNonNegativeInt,
   ASSET_PRELOAD_VERBOSE_LOGGING: optionalBoolean,
@@ -80,6 +87,7 @@ const envSchema = z.object({
   POSTHOG_KEY: optionalString,
   POSTHOG_HOST: optionalString,
   DURABULL_TELEMETRY_HMAC_SECRET: optionalString,
+  DURABULL_TELEMETRY_COLLECT_SECRET: optionalString,
   DURABULL_TELEMETRY_POSTHOG_HOST: optionalString,
   DURABULL_TELEMETRY_POSTHOG_KEY: optionalString,
   DURABULL_CLOUD: optionalBoolean,
@@ -94,6 +102,7 @@ const envSchema = z.object({
   DURABULL_DEMO_ACCOUNT_REDIS_CONNECTION_STRING: optionalString,
   DURABULL_ALERT_ENABLED: optionalBoolean,
   DURABULL_ALERT_POLL_INTERVAL_MS: optionalInt,
+  DURABULL_ALERT_JOB_RESOLVE_INTERVAL_MS: optionalInt,
   DURABULL_WEBHOOK_ALLOW_HTTP: optionalBoolean,
   LINEAR_OAUTH_CLIENT_ID: optionalString,
   LINEAR_OAUTH_CLIENT_SECRET: optionalString,

@@ -1,4 +1,5 @@
-import { AnalyticsEvents, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { createFileRoute, Link, Outlet, useMatchRoute, useNavigate } from '@tanstack/react-router'
 import { zodValidator } from '@tanstack/zod-adapter'
 import {
@@ -97,6 +98,7 @@ const queueSearchSchema = z.object({
   status: z.enum(['', 'waiting', 'active', 'delayed', 'completed', 'failed']).catch(''),
   jobId: z.string().catch(''),
   name: z.string().catch(''),
+  data: z.string().catch(''),
   hideScheduled: z
     .union([z.literal(0), z.literal(1), z.literal('0'), z.literal('1')])
     .transform((value) => (value === 1 || value === '1' ? 1 : 0))
@@ -147,12 +149,22 @@ export const Route = createFileRoute('/$orgSlug/c/$connectionId/queues/$queueNam
 
 function QueueDetailPage() {
   const { orgSlug, connectionId, queueName } = Route.useParams()
-  const { section, tab, status, jobId, name = '', hideScheduled, page } = Route.useSearch()
+  const {
+    section,
+    tab,
+    status,
+    jobId,
+    name = '',
+    data: dataSearch = '',
+    hideScheduled,
+    page,
+  } = Route.useSearch()
   const navigate = useNavigate()
   const matchRoute = useMatchRoute()
   const [selectedJobs, setSelectedJobs] = useState<Set<string>>(new Set())
   const [jobIdInput, setJobIdInput] = useState(jobId)
   const [nameInput, setNameInput] = useState(name)
+  const [dataInput, setDataInput] = useState(dataSearch)
   const [addJobDialogOpen, setAddJobDialogOpen] = useState(false)
   const [retryDialogOpen, setRetryDialogOpen] = useState(false)
   const [purgeDialogOpen, setPurgeDialogOpen] = useState(false)
@@ -195,6 +207,7 @@ function QueueDetailPage() {
     status: status || undefined,
     jobId: jobId || undefined,
     name: name || undefined,
+    data: dataSearch || undefined,
     pageSize: 20,
   })
   const {
@@ -217,7 +230,7 @@ function QueueDetailPage() {
   const removeMutation = useRemoveJobs()
   const invokeMutation = useInvokeJobs()
   const hideScheduledJobs = hideScheduled === 1
-  const hasClientSideJobFilter = Boolean(jobId || name)
+  const hasClientSideJobFilter = Boolean(jobId || name || dataSearch)
   const [visibleJobCount, setVisibleJobCount] = useState(20)
   const allJobs = useMemo(
     () => jobsData?.pages.flatMap((pageData) => pageData.jobs) ?? [],
@@ -229,9 +242,7 @@ function QueueDetailPage() {
   )
   const visibleJobs = useMemo(
     () =>
-      hasClientSideJobFilter
-        ? filteredVisibleJobs.slice(0, visibleJobCount)
-        : filteredVisibleJobs,
+      hasClientSideJobFilter ? filteredVisibleJobs.slice(0, visibleJobCount) : filteredVisibleJobs,
     [filteredVisibleJobs, hasClientSideJobFilter, visibleJobCount]
   )
   const hasMoreVisibleJobs = hasClientSideJobFilter
@@ -240,7 +251,7 @@ function QueueDetailPage() {
 
   useEffect(() => {
     setVisibleJobCount(20)
-  }, [jobId, name, status, hideScheduled, queueName])
+  }, [jobId, name, dataSearch, status, hideScheduled, queueName])
   const jobsScrollRef = useRef<HTMLDivElement | null>(null)
   const metricsPoints = metrics?.series.points ?? []
   const metricsTotals = metrics?.series.totals
@@ -312,6 +323,10 @@ function QueueDetailPage() {
     setNameInput(name)
   }, [name])
 
+  useEffect(() => {
+    setDataInput(dataSearch)
+  }, [dataSearch])
+
   const handleCopyPrometheus = useCallback(async () => {
     if (!prometheusText || typeof navigator === 'undefined' || !navigator.clipboard) {
       return
@@ -332,13 +347,22 @@ function QueueDetailPage() {
     const timer = setTimeout(() => {
       navigate({
         to: '.',
-        search: { section, tab, status, jobId: normalizedJobId, name, hideScheduled, page: 1 },
+        search: {
+          section,
+          tab,
+          status,
+          jobId: normalizedJobId,
+          name,
+          data: dataSearch,
+          hideScheduled,
+          page: 1,
+        },
         replace: true,
       })
     }, 300)
 
     return () => clearTimeout(timer)
-  }, [jobIdInput, jobId, section, tab, status, name, hideScheduled, navigate])
+  }, [jobIdInput, jobId, section, tab, status, name, dataSearch, hideScheduled, navigate])
 
   useEffect(() => {
     const normalizedName = nameInput.trim()
@@ -350,13 +374,40 @@ function QueueDetailPage() {
     const timer = setTimeout(() => {
       navigate({
         to: '.',
-        search: { section, tab, status, jobId, name: normalizedName, hideScheduled, page: 1 },
+        search: {
+          section,
+          tab,
+          status,
+          jobId,
+          name: normalizedName,
+          data: dataSearch,
+          hideScheduled,
+          page: 1,
+        },
         replace: true,
       })
     }, 300)
 
     return () => clearTimeout(timer)
-  }, [nameInput, name, section, tab, status, jobId, hideScheduled, navigate])
+  }, [nameInput, name, section, tab, status, jobId, dataSearch, hideScheduled, navigate])
+
+  useEffect(() => {
+    const normalizedData = dataInput.trim()
+
+    if (normalizedData === dataSearch) {
+      return
+    }
+
+    const timer = setTimeout(() => {
+      navigate({
+        to: '.',
+        search: { section, tab, status, jobId, name, data: normalizedData, hideScheduled, page: 1 },
+        replace: true,
+      })
+    }, 300)
+
+    return () => clearTimeout(timer)
+  }, [dataInput, dataSearch, section, tab, status, jobId, name, hideScheduled, navigate])
 
   useEffect(() => {
     const container = jobsScrollRef.current
@@ -651,6 +702,7 @@ function QueueDetailPage() {
               status,
               jobId,
               name,
+              data: dataSearch,
               hideScheduled,
               page,
             },
@@ -671,91 +723,103 @@ function QueueDetailPage() {
       {/* Stats cards */}
       {section === 'jobs' && (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Waiting</CardTitle>
+          <Card className="relative overflow-hidden">
+            <span
+              className="absolute inset-x-0 top-0 h-0.5 bg-status-neutral/40"
+              aria-hidden="true"
+            />
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 p-4 pb-2">
+              <CardTitle className="eyebrow">Waiting</CardTitle>
               <Clock className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
-            <CardContent>
+            <CardContent className="p-4 pt-0">
               {queueLoading ? (
                 <Skeleton className="h-8 w-20" />
               ) : (
-                <div className="text-2xl font-bold">
+                <div className="font-mono text-2xl font-semibold tracking-tight tabular-nums">
                   {formatNumber(queue?.jobCounts.waiting ?? 0)}
                 </div>
               )}
             </CardContent>
           </Card>
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Active</CardTitle>
-              <Zap className="h-4 w-4 text-blue-600" />
+          <Card className="relative overflow-hidden">
+            <span className="absolute inset-x-0 top-0 h-0.5 bg-status-active" aria-hidden="true" />
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 p-4 pb-2">
+              <CardTitle className="eyebrow">Active</CardTitle>
+              <Zap className="h-4 w-4 text-status-active" />
             </CardHeader>
-            <CardContent>
+            <CardContent className="p-4 pt-0">
               {queueLoading ? (
                 <Skeleton className="h-8 w-20" />
               ) : (
-                <div className="text-2xl font-bold text-blue-600">
+                <div className="font-mono text-2xl font-semibold tracking-tight tabular-nums">
                   {formatNumber(queue?.jobCounts.active ?? 0)}
                 </div>
               )}
             </CardContent>
           </Card>
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Delayed</CardTitle>
-              <Clock className="h-4 w-4 text-amber-500" />
+          <Card className="relative overflow-hidden">
+            <span className="absolute inset-x-0 top-0 h-0.5 bg-status-warning" aria-hidden="true" />
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 p-4 pb-2">
+              <CardTitle className="eyebrow">Delayed</CardTitle>
+              <Clock className="h-4 w-4 text-status-warning" />
             </CardHeader>
-            <CardContent>
+            <CardContent className="p-4 pt-0">
               {queueLoading ? (
                 <Skeleton className="h-8 w-20" />
               ) : (
-                <div className="text-2xl font-bold text-amber-600">
+                <div className="font-mono text-2xl font-semibold tracking-tight tabular-nums">
                   {formatNumber(queue?.jobCounts.delayed ?? 0)}
                 </div>
               )}
             </CardContent>
           </Card>
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Prioritized</CardTitle>
-              <Rocket className="h-4 w-4 text-violet-500" />
+          <Card className="relative overflow-hidden">
+            <span
+              className="absolute inset-x-0 top-0 h-0.5 bg-status-priority"
+              aria-hidden="true"
+            />
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 p-4 pb-2">
+              <CardTitle className="eyebrow">Prioritized</CardTitle>
+              <Rocket className="h-4 w-4 text-status-priority" />
             </CardHeader>
-            <CardContent>
+            <CardContent className="p-4 pt-0">
               {queueLoading ? (
                 <Skeleton className="h-8 w-20" />
               ) : (
-                <div className="text-2xl font-bold text-violet-600">
+                <div className="font-mono text-2xl font-semibold tracking-tight tabular-nums">
                   {formatNumber(queue?.jobCounts.prioritized ?? 0)}
                 </div>
               )}
             </CardContent>
           </Card>
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Failed</CardTitle>
-              <AlertCircle className="h-4 w-4 text-red-600" />
+          <Card className="relative overflow-hidden">
+            <span className="absolute inset-x-0 top-0 h-0.5 bg-status-danger" aria-hidden="true" />
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 p-4 pb-2">
+              <CardTitle className="eyebrow">Failed</CardTitle>
+              <AlertCircle className="h-4 w-4 text-status-danger" />
             </CardHeader>
-            <CardContent>
+            <CardContent className="p-4 pt-0">
               {queueLoading ? (
                 <Skeleton className="h-8 w-20" />
               ) : (
-                <div className="text-2xl font-bold text-red-600">
+                <div className="font-mono text-2xl font-semibold tracking-tight tabular-nums">
                   {formatNumber(queue?.jobCounts.failed ?? 0)}
                 </div>
               )}
             </CardContent>
           </Card>
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Waiting Children</CardTitle>
-              <BarChart3 className="h-4 w-4 text-teal-600" />
+          <Card className="relative overflow-hidden">
+            <span className="absolute inset-x-0 top-0 h-0.5 bg-status-success" aria-hidden="true" />
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 p-4 pb-2">
+              <CardTitle className="eyebrow">Waiting Children</CardTitle>
+              <BarChart3 className="h-4 w-4 text-status-success" />
             </CardHeader>
-            <CardContent>
+            <CardContent className="p-4 pt-0">
               {metricsLoading ? (
                 <Skeleton className="h-8 w-20" />
               ) : (
-                <div className="text-2xl font-bold text-teal-600">
+                <div className="font-mono text-2xl font-semibold tracking-tight tabular-nums">
                   {formatNumber(metrics?.counts.waitingChildren ?? 0)}
                 </div>
               )}
@@ -1364,7 +1428,7 @@ function QueueDetailPage() {
             </Card>
 
             {metrics?.warnings.length ? (
-              <div className="rounded-md border border-amber-300/60 bg-amber-50/30 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-300">
+              <div className="rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
                 Some metrics were unavailable in this Redis environment:{' '}
                 {metrics.warnings.join('; ')}
               </div>
@@ -1381,13 +1445,23 @@ function QueueDetailPage() {
           onValueChange={(newTab) =>
             navigate({
               to: '.',
-              search: { section, tab: newTab as typeof tab, status, jobId, name, hideScheduled, page },
+              search: {
+                section,
+                tab: newTab as typeof tab,
+                status,
+                jobId,
+                name,
+                data: dataSearch,
+                hideScheduled,
+                page,
+              },
               replace: true,
             })
           }
         >
           {/* Toolbar: filters on left, tab toggle on right */}
-          <div className="flex items-center justify-between gap-3">
+          {/* pt-1.5 keeps focus rings from being clipped by the Tabs' overflow-hidden */}
+          <div className="flex items-center justify-between gap-3 pt-1.5">
             <div className="flex items-center gap-2">
               {tab === 'jobs' && (
                 <>
@@ -1401,7 +1475,16 @@ function QueueDetailPage() {
                       })
                       navigate({
                         to: '.',
-                        search: { section, tab, status: newStatus, jobId, name, hideScheduled, page: 1 },
+                        search: {
+                          section,
+                          tab,
+                          status: newStatus,
+                          jobId,
+                          name,
+                          data: dataSearch,
+                          hideScheduled,
+                          page: 1,
+                        },
                         replace: true,
                       })
                     }}
@@ -1428,6 +1511,13 @@ function QueueDetailPage() {
                     className="w-48 max-w-full"
                     aria-label="Search jobs by name"
                   />
+                  <Input
+                    value={dataInput}
+                    onChange={(e) => setDataInput(e.target.value)}
+                    placeholder="Search in job data"
+                    className="w-48 max-w-full"
+                    aria-label="Search jobs by data payload"
+                  />
                   <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                     <input
                       type="checkbox"
@@ -1441,6 +1531,7 @@ function QueueDetailPage() {
                             status,
                             jobId,
                             name,
+                            data: dataSearch,
                             hideScheduled: e.target.checked ? 1 : 0,
                             page: 1,
                           },
@@ -2064,14 +2155,14 @@ function JobRow({
         >
           {isScheduledJob ? (
             <>
-              <Repeat className="h-4 w-4 text-violet-500 shrink-0" />
+              <Repeat className="h-4 w-4 text-status-priority shrink-0" />
               <span className="text-sm text-foreground group-hover:text-primary transition-colors">
                 Scheduled Job
               </span>
             </>
           ) : (
             <>
-              <SquarePlay className="h-4 w-4 text-emerald-500 shrink-0" />
+              <SquarePlay className="h-4 w-4 text-status-success shrink-0" />
               {isTruncated ? (
                 <TooltipProvider>
                   <Tooltip>
@@ -2093,7 +2184,7 @@ function JobRow({
                         aria-label="Copy job ID"
                       >
                         {copied ? (
-                          <Check className="h-3.5 w-3.5 text-green-400" />
+                          <Check className="h-3.5 w-3.5 text-status-success" />
                         ) : (
                           <Copy className="h-3.5 w-3.5" />
                         )}

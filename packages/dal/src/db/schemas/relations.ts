@@ -62,15 +62,38 @@ export const relations = defineRelations(tables, (r) => ({
       to: r.user.id,
     }),
   },
+  mcpServiceAccount: {
+    organization: r.one.organization({
+      from: r.mcpServiceAccount.organizationId,
+      to: r.organization.id,
+    }),
+    oauthApplication: r.one.oauthApplication({
+      from: r.mcpServiceAccount.oauthClientId,
+      to: r.oauthApplication.clientId,
+    }),
+    secrets: r.many.mcpServiceAccountSecret(),
+  },
+  mcpServiceAccountSecret: {
+    serviceAccount: r.one.mcpServiceAccount({
+      from: r.mcpServiceAccountSecret.serviceAccountId,
+      to: r.mcpServiceAccount.id,
+    }),
+    createdByUser: r.one.user({
+      from: r.mcpServiceAccountSecret.createdByUserId,
+      to: r.user.id,
+    }),
+  },
   organization: {
     members: r.many.member(),
     invitations: r.many.invitation(),
     redisConnections: r.many.redisConnection(),
     alertRules: r.many.alertRule(),
     alertEvents: r.many.alertEvent(),
+    alertDestinations: r.many.alertDestination(),
     linearIntegration: r.one.linearIntegration(),
     linearOauthStates: r.many.linearOauthState(),
     linearJobIssues: r.many.linearJobIssue(),
+    mcpServiceAccounts: r.many.mcpServiceAccount(),
   },
   member: {
     user: r.one.user({
@@ -149,6 +172,12 @@ export const relations = defineRelations(tables, (r) => ({
     }),
     organization: r.one.organization({
       from: r.alertDelivery.organizationId,
+      to: r.organization.id,
+    }),
+  },
+  alertDestination: {
+    organization: r.one.organization({
+      from: r.alertDestination.organizationId,
       to: r.organization.id,
     }),
   },

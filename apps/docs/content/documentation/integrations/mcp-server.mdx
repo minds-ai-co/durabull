@@ -1,0 +1,106 @@
+---
+title: MCP Server
+description: Connect AI assistants to Durabull read-only queue diagnostics through the hosted MCP endpoint.
+---
+
+Durabull exposes a **read-only** [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server on the same origin as the web app and API.
+
+```txt
+{APP_BASE_URL}/mcp
+```
+
+Example: `https://app.durabull.io/mcp`
+
+MCP runs inside the unified Durabull API process. There is no separate MCP port or container in phase 1.
+
+## What MCP provides
+
+Phase 1 ships diagnostic tools plus explicit alert resolution. It does not allow queue
+mutations, retries, pauses, job invocation, job deletion, or purges.
+
+**GA status:** Read-mostly MCP is implemented on the unified deployment. Before announcing production use, complete the [release checklist](https://github.com/durabullhq/durabull/blob/main/docs/mcp-ga-release-checklist.md) (staging smoke, config verification). Full GA doc set: [GA index](https://github.com/durabullhq/durabull/blob/main/docs/mcp-ga-index.md) (ADR, compliance, security closure, validation evidence).
+
+| Tool | Scope | Purpose |
+| --- | --- | --- |
+| `ping` | `mcp:discover` | Transport smoke check |
+| `list_connections` | `mcp:jobs:read` | Connections visible to the principal |
+| `list_queues` | `mcp:jobs:read` | Queue inventory for a connection |
+| `get_queue` | `mcp:jobs:read` | Queue detail and counts |
+| `list_jobs` | `mcp:jobs:read` | Paginated job summaries |
+| `get_job` | `mcp:jobs:read` | Safe job detail |
+| `get_job_logs` | `mcp:logs:read` | Paginated job logs |
+| `get_job_stacktraces` | `mcp:logs:read` | Attempt-indexed stacktraces |
+| `get_failure_events` | `mcp:failures:read` | Alert/failure events |
+| `resolve_alert_event` | `mcp:failures:write` | Mark an alert event resolved |
+| `get_queue_metrics` | `mcp:diagnostics:read` | Queue metrics window |
+| `get_workers` | `mcp:jobs:read` | Worker snapshots |
+| `explain_job_failure` | `mcp:diagnostics:read` + `mcp:jobs:read` + `mcp:logs:read` + `mcp:failures:read` | Deterministic failure summary |
+
+## Authentication
+
+Remote MCP clients authenticate with **OAuth 2.1 bearer tokens** issued by Durabull (Better Auth MCP plugin).
+
+1. Discover protected resource metadata at `GET /.well-known/oauth-protected-resource` (or `/api/auth/.well-known/oauth-protected-resource`).
+2. Register an OAuth client (`POST /api/auth/mcp/register`). On internet-facing deployments, registration is **unauthenticated** (rate-limited only) — monitor volume at the edge and prefer pre-provisioned clients where possible.
+3. Send the user through authorization code + PKCE at `/api/auth/mcp/authorize` with `prompt=consent` and `resource={APP_BASE_URL}/mcp`.
+4. The user signs in (if needed) and approves scopes on **`/consent`**.
+5. Exchange the authorization code at `/api/auth/mcp/token` with the same `resource` value.
+6. Call MCP with `Authorization: Bearer <access_token>`.
+
+Canonical resource URI:
+
+```txt
+{APP_BASE_URL}/mcp
+```
+
+`APP_BASE_URL` must match the public origin clients use to reach `/mcp` (including port in local dev).
+
+See the [MCP OAuth operator guide](https://github.com/durabullhq/durabull/blob/main/docs/mcp-oauth-operator.md) for HTTP status semantics and discovery endpoints.
+
+## Scopes
+
+| Scope | Grants |
+| --- | --- |
+| `mcp:discover` | Transport + `ping` |
+| `mcp:jobs:read` | Connection/queue/job/worker reads |
+| `mcp:logs:read` | Logs and stacktraces |
+| `mcp:failures:read` | Failure/alert events |
+| `mcp:failures:write` | Resolve failure/alert events |
+| `mcp:diagnostics:read` | Queue metrics; required (with jobs/logs/failures scopes) for `explain_job_failure` |
+
+Delegated users receive scopes from OAuth consent. Service accounts require explicit policy bindings per tool/scope.
+
+## Safety controls
+
+Authenticated callers still receive:
+
+- **Output redaction** — sensitive keys and inline secrets stripped; `_mcpSafety.redactionCount` when redactions occur
+- **Rate limits** (when `NODE_ENV=production`) — 120 HTTP requests/min on `/mcp` ingress (initialize, session, and tool RPCs); **60 calls/min per tool** per bearer (30/min for `get_job_logs`, `get_job_stacktraces`, `get_failure_events`, `get_queue_metrics`, `explain_job_failure`)
+- **Audit** — best-effort `mcp_audit_event` rows for tool calls (may drop under backpressure; see runbook)
+
+Operators: telemetry signals, SQL examples, and incident playbooks are in the [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md).
+
+## Local development
+
+Authless mode (`DURABULL_AUTHLESS=true`) is for **local/private** setups only. Never enable authless mode on Durabull Cloud. If authless is reachable from a network, set a strong `MCP_AUTHLESS_BEARER_TOKEN` — the non-production default token is for localhost dev only.
+
+For monorepo dev with the Vite app, set `APP_BASE_URL` to the web origin (`http://localhost:5173`) so `/mcp` and OAuth discovery share one origin (the dev server proxies to the API). For API-only smoke scripts, use the API port (`http://localhost:3001` or `http://localhost:3000` in Docker).
+
+For test commands and CI evidence, see [validation evidence](https://github.com/durabullhq/durabull/blob/main/docs/mcp-ga-validation-evidence.md). Run `mcp:e2e` only against local or staging databases (see runbook).
+
+## Deployment and operations
+
+MCP is always on when the Durabull API runs. Platform-specific deploy notes:
+
+- [Docker deployment](/documentation/deployment/docker)
+- [Cloud vs self-hosted](/documentation/deployment/cloud-vs-self-hosted)
+- [Render and demo](/documentation/deployment/render-and-demo)
+
+Post-deploy smoke and operations: [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md).
+
+## Related docs
+
+- [Security and Hardening](/documentation/operations/security-and-hardening)
+- [Troubleshooting](/documentation/operations/troubleshooting)
+- [Environment Variables](/documentation/getting-started/environment-variables)
+- [HTTP API Reference](/documentation/reference/http-api)

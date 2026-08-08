@@ -1,8 +1,13 @@
 import {
   type AlertDelivery,
+  type AlertDestination,
   type AlertEvent,
+  type AlertWebhookDestination,
   alertDeliveryRepository,
+  alertDestinationRepository,
   alertRuleRepository,
+  alertWebhookDestinationRepository,
+  decryptSecret,
   eq,
   getDb,
   linearIntegrationRepository,
@@ -12,9 +17,12 @@ import {
 } from '@durabull/dal'
 import { isEmailConfigured } from '@durabull/email'
 import { env } from '@durabull/env'
-import { createLinearIssue, LinearApiError } from './linear-client'
-import { getValidLinearAccessToken } from './linear-oauth'
 import { buildAlertAppUrls } from './alert-app-urls'
+import {
+  findWebhookSecretFromChannels,
+  sanitizeDeliveryProviderMetadata,
+  toWebhookDeliveryMetadata,
+} from './alert-webhook-channels'
 import {
   deliverWebhookOrThrow,
   isWebhookDeliveryExpired,
@@ -25,11 +33,10 @@ import {
   buildAlertWebhookPayloadFromEvent,
   serializeAlertWebhookPayload,
 } from './alert-webhook-payload'
-import {
-  findWebhookSecretFromChannels,
-  toWebhookDeliveryMetadata,
-} from './alert-webhook-channels'
 import { getWebhookDeliveryTarget } from './alert-webhook-url'
+import { createLinearIssue, LinearApiError } from './linear-client'
+import { resolveLinearIssueFields } from './linear-field-resolver'
+import { getValidLinearAccessToken } from './linear-oauth'
 
 class NonRetryableDeliveryError extends Error {
   constructor(message: string) {
@@ -37,6 +44,13 @@ class NonRetryableDeliveryError extends Error {
     this.name = 'NonRetryableDeliveryError'
   }
 }
+
+/**
+ * Notification dispatch only needs the connection's identity, not its secrets or
+ * Redis URL. Depending on this narrow shape lets callers (e.g. a manual retry)
+ * pass the already-resolved connection context without re-fetching or decrypting.
+ */
+export type AlertNotificationConnection = Pick<RedisConnection, 'id' | 'name'>
 
 export type NotificationChannel =
   | {
@@ -58,31 +72,90 @@ export type NotificationChannel =
       url: string
       secret?: string
     }
+  | {
+      type: 'webhook'
+      destinationId: string
+    }
+  | {
+      // Generalized saved-destination reference (webhook, email, or linear).
+      // Resolved at dispatch time so destination edits apply to queued work.
+      type: 'destination'
+      destinationId: string
+    }
 
 export async function dispatchAlertNotification(
   event: AlertEvent,
   channels: NotificationChannel[],
-  connection: RedisConnection,
+  connection: AlertNotificationConnection,
   ruleName: string
 ): Promise<void> {
-  const deliveries = channels.map((channel) => ({
-    alertEventId: event.id,
-    organizationId: event.organizationId,
-    channelType: channel.type,
-    target: getDeliveryTarget(channel),
-    providerMetadata: getDeliveryProviderMetadata(channel),
-  }))
+  const deliveries = await Promise.all(
+    channels.map((channel) => buildDeliveryInput(channel, event.id, event.organizationId))
+  )
 
   await alertDeliveryRepository.enqueueMany(deliveries)
   await processAlertDeliveries(event, connection, ruleName)
 }
 
+async function buildDeliveryInput(
+  channel: NotificationChannel,
+  alertEventId: string,
+  organizationId: string
+) {
+  if (channel.type === 'destination') {
+    // Only the reference is stored; the destination is resolved fresh at
+    // dispatch so editing it updates all rules and pending deliveries.
+    return {
+      alertEventId,
+      organizationId,
+      channelType: channel.type,
+      target: getSavedWebhookDeliveryTarget(channel.destinationId),
+      providerMetadata: { type: 'destination', destinationId: channel.destinationId },
+    }
+  }
+
+  if (channel.type === 'webhook' && 'destinationId' in channel) {
+    const destination = await alertWebhookDestinationRepository.findById(
+      channel.destinationId,
+      organizationId
+    )
+
+    return {
+      alertEventId,
+      organizationId,
+      channelType: channel.type,
+      target: getSavedWebhookDeliveryTarget(channel.destinationId),
+      providerMetadata: resolveSavedWebhookDeliveryMetadata(channel.destinationId, destination),
+    }
+  }
+
+  return {
+    alertEventId,
+    organizationId,
+    channelType: channel.type,
+    target: getDeliveryTarget(channel),
+    providerMetadata: getDeliveryProviderMetadata(channel),
+  }
+}
+
+export type ProcessAlertDeliveriesOptions = {
+  /** When set, claim and dispatch only this delivery (manual retry). */
+  deliveryId?: string
+  /** Used by the monitor sweep after it has already claimed delivery rows. */
+  claimedDeliveries?: AlertDelivery[]
+}
+
 export async function processAlertDeliveries(
   event: AlertEvent,
-  connection: RedisConnection,
-  ruleName: string
+  connection: AlertNotificationConnection,
+  ruleName: string,
+  options?: ProcessAlertDeliveriesOptions
 ): Promise<void> {
-  const dueDeliveries = await alertDeliveryRepository.claimDueForEvent(event.id)
+  const dueDeliveries =
+    options?.claimedDeliveries ??
+    (options?.deliveryId
+      ? await alertDeliveryRepository.claimById(options.deliveryId, event.id)
+      : await alertDeliveryRepository.claimDueForEvent(event.id))
   if (dueDeliveries.length === 0) return
 
   const organizationSlug = await getOrganizationSlug(event.organizationId)
@@ -109,6 +182,9 @@ export async function processAlertDeliveries(
         case 'webhook':
           await sendWebhookAlert(delivery, event, connection, ruleName, organizationSlug)
           break
+        case 'destination':
+          await sendDestinationAlert(delivery, event, connection, ruleName, organizationSlug)
+          break
         default:
           await alertDeliveryRepository.markFailed(delivery.id, {
             error: `Unknown channel type: ${delivery.channelType}`,
@@ -126,16 +202,22 @@ export async function processAlertDeliveries(
   }
 }
 
-function getDeliveryProviderMetadata(channel: NotificationChannel): Record<string, unknown> {
+function getDeliveryProviderMetadata(
+  channel: Exclude<NotificationChannel, { destinationId: string }>
+): Record<string, unknown> {
   if (channel.type === 'webhook') {
     return { ...toWebhookDeliveryMetadata(channel) }
   }
   return channel as Record<string, unknown>
 }
 
-function getDeliveryTarget(channel: NotificationChannel): string {
+function getDeliveryTarget(
+  channel: Exclude<NotificationChannel, { destinationId: string }>
+): string {
   if (channel.type === 'email') return channel.target
-  if (channel.type === 'webhook') return getWebhookDeliveryTarget(channel.url)
+  if (channel.type === 'webhook') {
+    return getWebhookDeliveryTarget(channel.url)
+  }
   return [
     'org-default',
     channel.teamId ?? '',
@@ -147,10 +229,65 @@ function getDeliveryTarget(channel: NotificationChannel): string {
   ].join(':')
 }
 
+function getSavedWebhookDeliveryTarget(destinationId: string): string {
+  return `destination:${destinationId}`
+}
+
+function resolveSavedWebhookDeliveryMetadata(
+  destinationId: string,
+  destination: AlertWebhookDestination | null
+): Record<string, unknown> {
+  if (!destination) {
+    return {
+      type: 'webhook',
+      destinationId,
+      deliveryError: 'Webhook destination was deleted before alert delivery was queued.',
+    }
+  }
+  if (!destination.enabled) {
+    return {
+      type: 'webhook',
+      destinationId,
+      destinationName: destination.name,
+      deliveryError: `Webhook destination "${destination.name}" is disabled.`,
+      deliveryErrorRetryable: true,
+    }
+  }
+
+  let secretLast4: string | undefined
+  if (destination.encryptedSigningSecret) {
+    try {
+      const secret = decryptSecret(destination.encryptedSigningSecret)
+      secretLast4 = secret.length >= 4 ? secret.slice(-4) : undefined
+    } catch {
+      return {
+        type: 'webhook',
+        destinationId,
+        destinationName: destination.name,
+        url: destination.url,
+        encryptedSigningSecret: destination.encryptedSigningSecret,
+        secretConfigured: true,
+        deliveryError: `Webhook destination "${destination.name}" signing secret could not be decrypted.`,
+        deliveryErrorRetryable: true,
+      }
+    }
+  }
+
+  return {
+    type: 'webhook',
+    destinationId,
+    destinationName: destination.name,
+    url: destination.url,
+    encryptedSigningSecret: destination.encryptedSigningSecret,
+    secretConfigured: Boolean(destination.encryptedSigningSecret),
+    ...(secretLast4 ? { secretLast4 } : {}),
+  }
+}
+
 async function sendAlertEmail(
   to: string,
   event: AlertEvent,
-  connection: RedisConnection,
+  connection: AlertNotificationConnection,
   ruleName: string,
   organizationSlug: string | null
 ): Promise<void> {
@@ -185,7 +322,7 @@ async function sendAlertEmail(
 async function sendLinearAlert(
   delivery: AlertDelivery,
   event: AlertEvent,
-  connection: RedisConnection,
+  connection: AlertNotificationConnection,
   ruleName: string,
   organizationSlug: string | null
 ): Promise<void> {
@@ -245,9 +382,17 @@ async function sendLinearAlert(
   }
 
   const accessToken = await getValidLinearAccessToken(integration)
-  const issue = await createLinearIssueOnce(accessToken, {
+  const resolvedFields = await resolveLinearIssueFields(integration, accessToken, {
     teamId,
-    title: buildLinearIssueTitle(event, connection, ruleName, jobContext.jobName),
+    projectId: channel.projectId ?? integration.defaultProjectId,
+    labelIds: channel.labelIds?.length ? channel.labelIds : integration.defaultLabelIds,
+    assigneeId: channel.assigneeId ?? integration.defaultAssigneeId,
+    stateId: channel.stateId ?? integration.defaultStateId,
+    priority: channel.priority ?? integration.defaultPriority,
+  })
+  const issue = await createLinearIssueOnce(accessToken, {
+    teamId: resolvedFields.teamId,
+    title: buildLinearIssueTitle(event, ruleName, jobContext.jobName),
     description: buildLinearIssueDescription({
       event,
       connection,
@@ -255,11 +400,11 @@ async function sendLinearAlert(
       jobUrl,
       jobContext,
     }),
-    projectId: channel.projectId ?? integration.defaultProjectId,
-    labelIds: channel.labelIds?.length ? channel.labelIds : integration.defaultLabelIds,
-    assigneeId: channel.assigneeId ?? integration.defaultAssigneeId,
-    stateId: channel.stateId ?? integration.defaultStateId,
-    priority: channel.priority ?? integration.defaultPriority,
+    projectId: resolvedFields.projectId,
+    labelIds: resolvedFields.labelIds,
+    assigneeId: resolvedFields.assigneeId,
+    stateId: resolvedFields.stateId,
+    priority: resolvedFields.priority,
   })
 
   try {
@@ -349,19 +494,128 @@ function requireClaimedAt(delivery: AlertDelivery): Date {
   })
 }
 
-async function sendWebhookAlert(
+async function sendDestinationAlert(
   delivery: AlertDelivery,
   event: AlertEvent,
-  connection: RedisConnection,
+  connection: AlertNotificationConnection,
   ruleName: string,
   organizationSlug: string | null
 ): Promise<void> {
-  const channel = parseWebhookChannel(delivery.providerMetadata)
-  const secret = await resolveWebhookSigningSecret(
-    event,
-    channel.url,
-    delivery.providerMetadata
+  const metadata = (delivery.providerMetadata ?? {}) as Record<string, unknown>
+  const destinationId = typeof metadata.destinationId === 'string' ? metadata.destinationId : ''
+  if (!destinationId) {
+    throw new NonRetryableDeliveryError('Destination delivery is missing its destination id.')
+  }
+
+  const destination = await alertDestinationRepository.findById(destinationId, event.organizationId)
+  if (!destination) {
+    throw new NonRetryableDeliveryError('Notification destination no longer exists.')
+  }
+  if (!destination.enabled) {
+    throw new WebhookDeliveryError(`Destination "${destination.name}" is disabled.`, {
+      retryable: true,
+    })
+  }
+
+  switch (destination.type) {
+    case 'email': {
+      const target = getEmailDestinationTarget(destination)
+      await sendAlertEmail(target, event, connection, ruleName, organizationSlug)
+      await alertDeliveryRepository.markDelivered(
+        delivery.id,
+        {
+          providerMetadata: {
+            ...metadata,
+            resolvedType: 'email',
+            destinationName: destination.name,
+            target,
+          },
+        },
+        requireClaimedAt(delivery)
+      )
+      break
+    }
+    case 'linear': {
+      const config =
+        typeof destination.config === 'object' && destination.config !== null
+          ? (destination.config as Record<string, unknown>)
+          : {}
+      await sendLinearAlert(
+        {
+          ...delivery,
+          providerMetadata: {
+            // Preserve the original destination marker (mirrors the email
+            // branch) instead of overwriting it with 'linear' — parseLinearChannel
+            // only reads the config fields below and ignores `type`.
+            ...metadata,
+            ...config,
+            resolvedType: 'linear',
+            destinationName: destination.name,
+          },
+        },
+        event,
+        connection,
+        ruleName,
+        organizationSlug
+      )
+      break
+    }
+    case 'webhook': {
+      // Webhook-type destination deliveries share the webhook expiry window.
+      if (isWebhookDeliveryExpired(delivery.createdAt)) {
+        throw new NonRetryableDeliveryError(WEBHOOK_DELIVERY_ABANDONED_MESSAGE)
+      }
+      await sendWebhookAlert(
+        {
+          ...delivery,
+          providerMetadata: resolveSavedWebhookDeliveryMetadata(destinationId, destination),
+        },
+        event,
+        connection,
+        ruleName,
+        organizationSlug
+      )
+      break
+    }
+    default:
+      throw new NonRetryableDeliveryError(
+        `Destination "${destination.name}" has an unknown type: ${destination.type}`
+      )
+  }
+}
+
+function getEmailDestinationTarget(destination: AlertDestination): string {
+  const target =
+    typeof destination.config === 'object' && destination.config !== null
+      ? (destination.config as { target?: unknown }).target
+      : undefined
+  if (typeof target !== 'string' || !target) {
+    throw new NonRetryableDeliveryError(
+      `Email destination "${destination.name}" has no target address configured.`
+    )
+  }
+  return target
+}
+
+async function sendWebhookAlert(
+  delivery: AlertDelivery,
+  event: AlertEvent,
+  connection: AlertNotificationConnection,
+  ruleName: string,
+  organizationSlug: string | null
+): Promise<void> {
+  const metadata = await resolveWebhookMetadataForDispatch(
+    delivery.providerMetadata as Record<string, unknown> | null | undefined,
+    event.organizationId
   )
+  if (metadata && typeof metadata.deliveryError === 'string') {
+    if (metadata.deliveryErrorRetryable === true) {
+      throw new WebhookDeliveryError(metadata.deliveryError, { retryable: true })
+    }
+    throw new NonRetryableDeliveryError(metadata.deliveryError)
+  }
+  const channel = parseWebhookChannel(metadata)
+  const secret = await resolveWebhookSigningSecret(event, channel.url, metadata)
   const payload = buildAlertWebhookPayloadFromEvent(
     event,
     delivery.id,
@@ -383,12 +637,13 @@ async function sendWebhookAlert(
   const marked = await alertDeliveryRepository.markDelivered(
     delivery.id,
     {
-      providerMetadata: {
+      providerMetadata: sanitizeDeliveryProviderMetadata({
         ...((delivery.providerMetadata ?? {}) as Record<string, unknown>),
+        ...(metadata ?? {}),
         httpStatus: result.httpStatus,
         responseTimeMs: result.durationMs,
         responseBodySnippet: result.responseBodySnippet,
-      },
+      }),
     },
     requireClaimedAt(delivery)
   )
@@ -400,7 +655,23 @@ async function sendWebhookAlert(
   }
 }
 
-function parseWebhookChannel(value: unknown): Extract<NotificationChannel, { type: 'webhook' }> {
+async function resolveWebhookMetadataForDispatch(
+  metadata: Record<string, unknown> | null | undefined,
+  organizationId: string
+): Promise<Record<string, unknown> | null | undefined> {
+  const destinationId = typeof metadata?.destinationId === 'string' ? metadata.destinationId : ''
+  if (!destinationId || typeof metadata?.deliveryError !== 'string') {
+    return metadata
+  }
+
+  const destination = await alertWebhookDestinationRepository.findById(
+    destinationId,
+    organizationId
+  )
+  return resolveSavedWebhookDeliveryMetadata(destinationId, destination)
+}
+
+function parseWebhookChannel(value: unknown): { type: 'webhook'; url: string } {
   const source =
     typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
   const url = typeof source.url === 'string' ? source.url : ''
@@ -420,6 +691,16 @@ async function resolveWebhookSigningSecret(
 ): Promise<string | undefined> {
   const source =
     typeof metadata === 'object' && metadata !== null ? (metadata as Record<string, unknown>) : {}
+  const encryptedSigningSecret =
+    typeof source.encryptedSigningSecret === 'string' ? source.encryptedSigningSecret : ''
+  if (encryptedSigningSecret) {
+    try {
+      return decryptSecret(encryptedSigningSecret)
+    } catch {
+      throw new NonRetryableDeliveryError('Webhook signing secret could not be decrypted.')
+    }
+  }
+
   const legacySecret = typeof source.secret === 'string' ? source.secret.trim() : ''
   if (legacySecret.length > 0) {
     return legacySecret
@@ -473,17 +754,18 @@ function getJobContext(context: unknown): {
 
 function buildLinearIssueTitle(
   event: AlertEvent,
-  connection: RedisConnection,
   ruleName: string,
   jobName: string | null
 ): string {
+  // Linear issue titles are plain text, not markdown — never escape them.
+  // The connection name is omitted: it's in the description and only crowds the title.
   if (event.type === 'job_failed') {
-    return `[Durabull] ${connection.name}/${event.queueName} job failed${
-      jobName ? `: ${safeLinearMarkdown(jobName, 200)}` : ''
+    return `[Durabull] ${event.queueName} job failed${
+      jobName ? `: ${plainLinearText(jobName, 200)}` : ''
     }`
   }
 
-  return `[Durabull] ${safeLinearMarkdown(ruleName, 200)} fired for ${connection.name}/${event.queueName}`
+  return `[Durabull] ${plainLinearText(ruleName, 200)} fired for ${event.queueName}`
 }
 
 function buildLinearIssueDescription({
@@ -494,42 +776,56 @@ function buildLinearIssueDescription({
   jobContext,
 }: {
   event: AlertEvent
-  connection: RedisConnection
+  connection: AlertNotificationConnection
   ruleName: string
   jobUrl: string
   jobContext: ReturnType<typeof getJobContext>
 }): string {
   const lines = [
-    `Durabull alert rule **${safeLinearMarkdown(ruleName, 200)}** fired.`,
+    `Durabull alert rule **${plainLinearText(ruleName, 200)}** fired.`,
     '',
-    `- Connection: ${connection.name}`,
-    `- Queue: ${event.queueName}`,
-    `- Summary: ${safeLinearMarkdown(event.summary)}`,
-    `- Fired at: ${event.firedAt.toISOString()}`,
+    `- **Connection:** ${linearInlineCode(connection.name)}`,
+    `- **Queue:** ${linearInlineCode(event.queueName)}`,
+    `- **Summary:** ${plainLinearText(event.summary)}`,
+    `- **Fired at:** ${event.firedAt.toISOString()}`,
   ]
 
-  if (jobContext.jobId) lines.push(`- Job ID: ${jobContext.jobId}`)
-  if (jobContext.jobName) lines.push(`- Job name: ${safeLinearMarkdown(jobContext.jobName, 200)}`)
-  if (jobContext.failedReason) {
-    lines.push(`- Failure reason: ${safeLinearMarkdown(jobContext.failedReason)}`)
+  if (jobContext.jobId) lines.push(`- **Job ID:** ${linearInlineCode(jobContext.jobId)}`)
+  if (jobContext.jobName) {
+    lines.push(`- **Job name:** ${linearInlineCode(plainLinearText(jobContext.jobName, 200))}`)
   }
   if (jobContext.attemptsMade !== null) {
-    lines.push(`- Attempts made: ${jobContext.attemptsMade}`)
+    lines.push(`- **Attempts made:** ${jobContext.attemptsMade}`)
   }
-  if (jobContext.attempts !== null) lines.push(`- Max attempts: ${jobContext.attempts}`)
-  if (jobContext.failedAt) lines.push(`- Failed at: ${jobContext.failedAt}`)
+  if (jobContext.attempts !== null) lines.push(`- **Max attempts:** ${jobContext.attempts}`)
+  if (jobContext.failedAt) lines.push(`- **Failed at:** ${jobContext.failedAt}`)
+
+  if (jobContext.failedReason) {
+    lines.push('', '**Failure reason:**', '', linearCodeBlock(jobContext.failedReason))
+  }
+
   lines.push('', `[Open in Durabull](${jobUrl})`)
 
   return lines.join('\n')
 }
 
-function safeLinearMarkdown(value: string, maxLength = 1000): string {
+function plainLinearText(value: string, maxLength = 1000): string {
   const normalized = value.replace(/\s+/g, ' ').trim()
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, Math.max(0, maxLength - 1))}...`
+    : normalized
+}
+
+function linearInlineCode(value: string): string {
+  return `\`${value.replaceAll('`', "'")}\``
+}
+
+function linearCodeBlock(value: string, maxLength = 4000): string {
+  // Preserve newlines (stack traces), but strip fence-breaking sequences.
+  const sanitized = value.replaceAll('```', "'''").trim()
   const truncated =
-    normalized.length > maxLength
-      ? `${normalized.slice(0, Math.max(0, maxLength - 1))}...`
-      : normalized
-  return truncated.replace(/([\\`*_{}[\]()#+\-.!>])/g, '\\$1')
+    sanitized.length > maxLength ? `${sanitized.slice(0, maxLength)}\n...` : sanitized
+  return `\`\`\`\n${truncated}\n\`\`\``
 }
 
 function classifyDeliveryFailure(
@@ -537,10 +833,7 @@ function classifyDeliveryFailure(
   attemptCount: number,
   delivery?: Pick<AlertDelivery, 'channelType' | 'createdAt'>
 ): { error: string; retryable: boolean; nextRetryAt?: Date | null } {
-  if (
-    delivery?.channelType === 'webhook' &&
-    isWebhookDeliveryExpired(delivery.createdAt)
-  ) {
+  if (delivery?.channelType === 'webhook' && isWebhookDeliveryExpired(delivery.createdAt)) {
     return { error: WEBHOOK_DELIVERY_ABANDONED_MESSAGE, retryable: false }
   }
 
@@ -575,3 +868,12 @@ async function getOrganizationSlug(organizationId: string): Promise<string | nul
 }
 
 export { buildAlertAppUrls } from './alert-app-urls'
+
+export const __alertNotifierTestUtils = {
+  buildDeliveryInput,
+  getSavedWebhookDeliveryTarget,
+  resolveWebhookMetadataForDispatch,
+  sendDestinationAlert,
+  buildLinearIssueTitle,
+  buildLinearIssueDescription,
+}

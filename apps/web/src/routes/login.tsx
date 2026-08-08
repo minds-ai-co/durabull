@@ -1,7 +1,14 @@
-import { AnalyticsEvents, AuthMethod, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents, AuthMethod } from '@durabull/analytics/events'
+import {
+  buildMcpAuthorizeResumeUrl,
+  hasMcpAuthorizeQuery,
+  isSafeAppRedirectPath,
+  resolveSafeAppRedirectPath,
+} from '@durabull/auth/client'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { AlertCircle, Github, Loader2, Mail } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AuthLayout } from '@/components/auth-layout'
 import { DurabullLogo, DurabullWordmark } from '@/components/durabull-logo'
 import { Button } from '@/components/ui/button'
@@ -13,20 +20,33 @@ import { getAuthErrorMessage, useAuth } from '@/hooks/use-auth'
 
 interface LoginSearch {
   invitationId?: string
+  redirect?: string
 }
 
-export const Route = createFileRoute('/login')({
-  validateSearch: (search: Record<string, unknown>): LoginSearch => ({
+function parseLoginSearch(search: Record<string, unknown>): LoginSearch {
+  const redirectRaw =
+    typeof search.redirect === 'string' &&
+    search.redirect.length > 0 &&
+    isSafeAppRedirectPath(search.redirect)
+      ? search.redirect
+      : undefined
+
+  return {
     invitationId:
       typeof search.invitationId === 'string' && search.invitationId.length > 0
         ? search.invitationId
         : undefined,
-  }),
+    redirect: redirectRaw,
+  }
+}
+
+export const Route = createFileRoute('/login')({
+  validateSearch: (search: Record<string, unknown>): LoginSearch => parseLoginSearch(search),
   component: LoginPage,
 })
 
 function LoginPage() {
-  const { invitationId } = Route.useSearch()
+  const { invitationId, redirect } = Route.useSearch()
   const navigate = useNavigate()
   const { signIn, isAuthenticated, isLoading: sessionLoading, refetch } = useAuth()
   const [isLoading, setIsLoading] = useState(false)
@@ -39,12 +59,51 @@ function LoginPage() {
 
   const invitationPath = invitationId ? `/invite/${invitationId}` : null
 
-  const getOAuthCallbackURL = () => {
-    if (!invitationPath || typeof window === 'undefined') return undefined
-    return `${window.location.origin}${invitationPath}`
+  const getPostAuthCallbackURL = (): string | undefined => {
+    if (typeof window === 'undefined') {
+      return undefined
+    }
+
+    if (redirect) {
+      return `${window.location.origin}${redirect}`
+    }
+
+    const urlParams = Object.fromEntries(new URLSearchParams(window.location.search).entries())
+    const mcpAuthorizeUrl = buildMcpAuthorizeResumeUrl(urlParams)
+    if (mcpAuthorizeUrl) {
+      return `${window.location.origin}${mcpAuthorizeUrl}`
+    }
+
+    if (invitationPath) {
+      return `${window.location.origin}${invitationPath}`
+    }
+
+    return undefined
   }
 
   const navigateAfterAuth = () => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    const safeRedirect = redirect
+      ? resolveSafeAppRedirectPath(redirect, window.location.origin)
+      : undefined
+    if (safeRedirect) {
+      window.location.assign(safeRedirect)
+      return
+    }
+
+    const urlParams =
+      typeof window !== 'undefined'
+        ? Object.fromEntries(new URLSearchParams(window.location.search).entries())
+        : {}
+    const mcpAuthorizeUrl = buildMcpAuthorizeResumeUrl(urlParams)
+    if (mcpAuthorizeUrl) {
+      window.location.assign(mcpAuthorizeUrl)
+      return
+    }
+
     if (invitationId) {
       navigate({ to: '/invite/$invitationId', params: { invitationId } })
       return
@@ -52,21 +111,12 @@ function LoginPage() {
     navigate({ to: '/' })
   }
 
-  // Redirect if already authenticated
-  if (sessionLoading) {
-    return (
-      <AuthLayout>
-        <div className="flex min-h-screen items-center justify-center">
-          <Loader2 className="h-8 w-8 animate-spin text-primary" />
-        </div>
-      </AuthLayout>
-    )
-  }
-
-  if (isAuthenticated) {
-    navigateAfterAuth()
-    return null
-  }
+  useEffect(() => {
+    if (!sessionLoading && isAuthenticated) {
+      navigateAfterAuth()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- resume once when session becomes authenticated
+  }, [isAuthenticated, sessionLoading])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -93,7 +143,6 @@ function LoginPage() {
         success: true,
       })
 
-      // Refetch session to update auth state
       await refetch()
       navigateAfterAuth()
     } catch (err) {
@@ -108,10 +157,15 @@ function LoginPage() {
 
     trackEvent(AnalyticsEvents.USER_SIGNED_IN, {
       auth_method: AuthMethod.GOOGLE,
-      success: true, // OAuth redirects, so we track the attempt
+      success: true,
     })
 
-    const callbackURL = getOAuthCallbackURL()
+    const callbackURL = getPostAuthCallbackURL()
+    const authorizeParams =
+      typeof window !== 'undefined'
+        ? Object.fromEntries(new URLSearchParams(window.location.search).entries())
+        : {}
+    const preserveMcpAuthorize = hasMcpAuthorizeQuery(authorizeParams)
 
     try {
       const result = await signIn.social({
@@ -122,7 +176,7 @@ function LoginPage() {
               newUserCallbackURL: callbackURL,
             }
           : {}),
-        ...(invitationId
+        ...(invitationId || preserveMcpAuthorize
           ? {
               requestSignUp: true,
             }
@@ -132,7 +186,6 @@ function LoginPage() {
       if (result?.error) {
         const errorMessage = getAuthErrorMessage(result, 'Failed to sign in with Google')
 
-        // If the account already exists with a different provider, redirect to error page
         if (errorMessage === 'ACCOUNT_EXISTS') {
           navigate({ to: '/auth-error', search: { reason: 'account-exists', provider: 'google' } })
           return
@@ -153,10 +206,16 @@ function LoginPage() {
 
     trackEvent(AnalyticsEvents.USER_SIGNED_IN, {
       auth_method: AuthMethod.GITHUB,
-      success: true, // OAuth redirects, so we track the attempt
+      success: true,
     })
 
-    const callbackURL = getOAuthCallbackURL()
+    const callbackURL = getPostAuthCallbackURL()
+
+    const authorizeParams =
+      typeof window !== 'undefined'
+        ? Object.fromEntries(new URLSearchParams(window.location.search).entries())
+        : {}
+    const preserveMcpAuthorize = hasMcpAuthorizeQuery(authorizeParams)
 
     try {
       const result = await signIn.social({
@@ -167,7 +226,7 @@ function LoginPage() {
               newUserCallbackURL: callbackURL,
             }
           : {}),
-        ...(invitationId
+        ...(invitationId || preserveMcpAuthorize
           ? {
               requestSignUp: true,
             }
@@ -177,7 +236,6 @@ function LoginPage() {
       if (result?.error) {
         const errorMessage = getAuthErrorMessage(result, 'Failed to sign in with GitHub')
 
-        // If the account already exists with a different provider, redirect to error page
         if (errorMessage === 'ACCOUNT_EXISTS') {
           navigate({ to: '/auth-error', search: { reason: 'account-exists', provider: 'github' } })
           return
@@ -192,11 +250,20 @@ function LoginPage() {
     }
   }
 
+  if (sessionLoading || isAuthenticated) {
+    return (
+      <AuthLayout>
+        <div className="flex min-h-screen items-center justify-center">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        </div>
+      </AuthLayout>
+    )
+  }
+
   return (
     <AuthLayout>
       <div className="flex min-h-screen items-center justify-center p-4 pt-24">
         <Card className="w-full max-w-md border-border bg-card p-8">
-          {/* Logo */}
           <div className="mb-8 flex flex-col items-center">
             <div className="flex items-center gap-2">
               <DurabullLogo className="h-10 w-10 text-primary" />
@@ -207,7 +274,6 @@ function LoginPage() {
             </p>
           </div>
 
-          {/* Social Login Buttons */}
           <div className="space-y-3">
             <Button
               variant="outline"
@@ -254,7 +320,6 @@ function LoginPage() {
             </span>
           </div>
 
-          {/* Email/Password Form */}
           <form onSubmit={handleSubmit} className="space-y-4" data-testid="login-form">
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
@@ -299,7 +364,6 @@ function LoginPage() {
             </Button>
           </form>
 
-          {/* Link to Sign Up */}
           <p className="mt-6 text-center text-sm text-muted-foreground">
             Don't have an account?{' '}
             {invitationId ? (

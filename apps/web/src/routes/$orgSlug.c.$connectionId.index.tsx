@@ -1,4 +1,7 @@
-import { createFileRoute, useParams } from '@tanstack/react-router'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
+import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router'
+import { zodValidator } from '@tanstack/zod-adapter'
 import {
   Activity,
   AlertCircle,
@@ -6,11 +9,14 @@ import {
   Clock,
   Layers,
   Loader2,
+  Rocket,
   Search,
   Timer,
   Zap,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
+import { z } from 'zod'
 import { useAppTopBar } from '@/components/app-top-bar'
 import { QueueTable } from '@/components/queue-table'
 import { Button } from '@/components/ui/button'
@@ -18,15 +24,25 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
-  type ListQueuesResponse,
+  QUEUE_SORT_FIELDS,
+  type QueueSortField,
+  type QueueSortOrder,
+  type QueueStatusFilter,
   useDiscoverQueues,
   useQueueDiscoveryStatus,
   useQueues,
 } from '@/hooks/use-queues'
 import { REDIS_CONNECTION_ERROR_MESSAGE } from '@/lib/api'
+import { PAGINATION } from '@/lib/constants'
+import {
+  getDefaultQueuesView,
+  isSameQueuesView,
+  saveDefaultQueuesView,
+} from '@/lib/queues-default-view'
 import { cn, formatNumber } from '@/lib/utils'
 
 const AUTO_DISCOVERY_MIN_INTERVAL_MS = 5 * 60 * 1000
+const QUEUE_DISCOVERY_TOAST_ID = 'queue-discovery'
 
 function isRedisConnectionFailure(message: string): boolean {
   const normalized = message.toLowerCase()
@@ -45,17 +61,87 @@ function isRedisConnectionFailure(message: string): boolean {
   ].some((indicator) => normalized.includes(indicator))
 }
 
+// Missing/invalid params fall back to the user's saved default view
+const dashboardSearchSchema = z.object({
+  page: z.number().int().positive().catch(1),
+  q: z.string().catch(() => getDefaultQueuesView().q),
+  status: z.enum(['', 'active', 'paused']).catch(() => getDefaultQueuesView().status),
+  sortBy: z.enum(QUEUE_SORT_FIELDS).catch(() => getDefaultQueuesView().sortBy),
+  sortOrder: z.enum(['asc', 'desc']).catch(() => getDefaultQueuesView().sortOrder),
+})
+
 export const Route = createFileRoute('/$orgSlug/c/$connectionId/')({
+  validateSearch: zodValidator(dashboardSearchSchema),
   component: Dashboard,
 })
 
 function Dashboard() {
   const routeParams = useParams({ strict: false }) as { connectionId?: string }
   const connectionId = routeParams.connectionId ?? ''
-  const { data, isLoading, error } = useQueues()
+  const { page, q, status, sortBy, sortOrder } = Route.useSearch()
+  const navigate = useNavigate()
+
+  const updateSearch = useCallback(
+    (patch: Partial<z.infer<typeof dashboardSearchSchema>>) => {
+      void navigate({
+        from: Route.fullPath,
+        search: (prev) => ({ ...prev, ...patch }),
+        replace: true,
+      })
+    },
+    [navigate]
+  )
+
+  const setPage = useCallback(
+    (nextPage: number) => updateSearch({ page: nextPage }),
+    [updateSearch]
+  )
+
+  // Any change to filters or sorting invalidates the current page offset
+  const handleSortChange = useCallback(
+    (nextSortBy: QueueSortField, nextSortOrder: QueueSortOrder) =>
+      updateSearch({ sortBy: nextSortBy, sortOrder: nextSortOrder, page: 1 }),
+    [updateSearch]
+  )
+  const handleSearchChange = useCallback(
+    (nextSearch: string) => updateSearch({ q: nextSearch, page: 1 }),
+    [updateSearch]
+  )
+  const handleStatusFilterChange = useCallback(
+    (nextStatus: QueueStatusFilter | '') => updateSearch({ status: nextStatus, page: 1 }),
+    [updateSearch]
+  )
+
+  const [savedView, setSavedView] = useState(getDefaultQueuesView)
+  const currentView = useMemo(
+    () => ({ q, status, sortBy, sortOrder }),
+    [q, status, sortBy, sortOrder]
+  )
+  const isCurrentViewSaved = isSameQueuesView(currentView, savedView)
+  const handleSaveDefaultView = useCallback(() => {
+    trackEvent(AnalyticsEvents.QUEUE_LIST_DEFAULT_VIEW_SAVED, {
+      sort_by: currentView.sortBy,
+      sort_order: currentView.sortOrder,
+      status: currentView.status || 'all',
+      has_search: currentView.q !== '',
+    })
+    saveDefaultQueuesView(currentView)
+    setSavedView(currentView)
+  }, [currentView])
+
+  const { data, isLoading, error, isPlaceholderData } = useQueues({
+    page,
+    pageSize: PAGINATION.QUEUES_PAGE_SIZE,
+    sortBy,
+    sortOrder,
+    search: q || undefined,
+    status: status || undefined,
+  })
   const discoveryQuery = useQueueDiscoveryStatus()
   const discoverMutation = useDiscoverQueues()
   const hasAutoTriggeredDiscovery = useRef(false)
+  const wasDiscoveryRunningRef = useRef(false)
+  const lastDiscoveryErrorShownRef = useRef<string | null>(null)
   const discoveryPendingCount = Math.max(
     discoveryQuery.data?.indexed.pending ?? 0,
     data?.discovery?.indexed.pending ?? 0
@@ -81,7 +167,8 @@ function Dashboard() {
   useEffect(() => {
     if (!connectionId) return
     hasAutoTriggeredDiscovery.current = false
-  }, [connectionId])
+    setPage(1)
+  }, [connectionId, setPage])
 
   useEffect(() => {
     if (hasAutoTriggeredDiscovery.current) return
@@ -93,6 +180,40 @@ function Dashboard() {
     hasAutoTriggeredDiscovery.current = true
     discoverMutation.mutate()
   }, [data, discoverMutation, discoveryRunning, hasRecentDiscovery, isLoading])
+
+  useEffect(() => {
+    if (discoveryRunning) {
+      lastDiscoveryErrorShownRef.current = null
+      toast.loading(
+        'Discovering queues in Redis. Pending queues will appear dimmed until confirmed.',
+        { id: QUEUE_DISCOVERY_TOAST_ID }
+      )
+      wasDiscoveryRunningRef.current = true
+      return
+    }
+
+    if (wasDiscoveryRunningRef.current) {
+      toast.dismiss(QUEUE_DISCOVERY_TOAST_ID)
+      wasDiscoveryRunningRef.current = false
+
+      if (discoveryErrorMessage) {
+        lastDiscoveryErrorShownRef.current = discoveryErrorMessage
+        toast.error(`Discovery failed: ${discoveryErrorMessage}`)
+      }
+      return
+    }
+
+    if (discoveryErrorMessage && discoveryErrorMessage !== lastDiscoveryErrorShownRef.current) {
+      lastDiscoveryErrorShownRef.current = discoveryErrorMessage
+      toast.error(`Discovery failed: ${discoveryErrorMessage}`)
+    }
+  }, [discoveryRunning, discoveryErrorMessage])
+
+  useEffect(() => {
+    return () => {
+      toast.dismiss(QUEUE_DISCOVERY_TOAST_ID)
+    }
+  }, [connectionId])
 
   const topBarConfig = useMemo(
     () => ({
@@ -117,14 +238,15 @@ function Dashboard() {
             size="xs"
             onClick={() => discoverMutation.mutate()}
             disabled={discoveryRunning}
+            aria-busy={discoveryRunning}
             className="gap-2"
           >
             {discoveryRunning ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
             ) : (
-              <Search className="h-4 w-4" />
+              <Search className="h-4 w-4" aria-hidden="true" />
             )}
-            Discover Queues
+            {discoveryRunning ? 'Discovering…' : 'Discover Queues'}
           </Button>
         </div>
       ),
@@ -137,7 +259,7 @@ function Dashboard() {
   const shouldShowConnectionFailure =
     !error &&
     !isLoading &&
-    (data?.total ?? 0) === 0 &&
+    (data?.totalUnfiltered ?? data?.total ?? 0) === 0 &&
     !discoveryRunning &&
     !!discoveryErrorMessage &&
     isRedisConnectionFailure(discoveryErrorMessage)
@@ -146,8 +268,8 @@ function Dashboard() {
     const message = error?.message ?? REDIS_CONNECTION_ERROR_MESSAGE
     return (
       <div className="flex flex-col items-center justify-center py-12">
-        <div className="rounded-full bg-red-100 dark:bg-red-900/20 p-4 mb-4">
-          <AlertCircle className="h-8 w-8 text-red-600 dark:text-red-400" />
+        <div className="rounded-full bg-status-danger/10 p-4 mb-4">
+          <AlertCircle className="h-8 w-8 text-status-danger" />
         </div>
         <h2 className="text-xl font-semibold mb-2">Failed to load queues</h2>
         <p className="text-muted-foreground text-center max-w-md">{message}</p>
@@ -156,50 +278,34 @@ function Dashboard() {
   }
 
   const queues = data?.queues ?? []
-  type Queue = ListQueuesResponse['queues'][number]
-  type Totals = {
-    waiting: number
-    active: number
-    failed: number
-    delayed: number
-    completed: number
+  const totals = data?.totalJobCounts ?? {
+    waiting: 0,
+    active: 0,
+    failed: 0,
+    delayed: 0,
+    completed: 0,
+    prioritized: 0,
   }
-  const totals = queues.reduce<Totals>(
-    (acc: Totals, q: Queue) => ({
-      waiting: acc.waiting + q.jobCounts.waiting,
-      active: acc.active + q.jobCounts.active,
-      failed: acc.failed + q.jobCounts.failed,
-      delayed: acc.delayed + q.jobCounts.delayed,
-      completed: acc.completed + q.jobCounts.completed,
-    }),
-    { waiting: 0, active: 0, failed: 0, delayed: 0, completed: 0 }
-  )
 
   return (
     <TooltipProvider>
       <div className="space-y-8">
-        {discoveryRunning && (
-          <div className="flex items-center gap-2 rounded-lg border border-muted-foreground/20 bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Discovering queues in Redis. Pending queues will appear dimmed until confirmed.
-          </div>
-        )}
-
-        {!discoveryRunning && discoveryErrorMessage && (
-          <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
-            <AlertCircle className="h-4 w-4" />
-            Discovery failed: {discoveryErrorMessage}
-          </div>
-        )}
-
         {/* Summary stats */}
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           <StatCard
             title="Waiting"
             value={totals.waiting}
             icon={Clock}
             loading={isLoading}
             tooltip="Jobs waiting to be processed"
+          />
+          <StatCard
+            title="Prioritized"
+            value={totals.prioritized}
+            icon={Rocket}
+            loading={isLoading}
+            variant="violet"
+            tooltip="Prioritized jobs waiting ahead of the standard queue"
           />
           <StatCard
             title="Active"
@@ -247,14 +353,13 @@ function Dashboard() {
                 </span>
               )}
             </div>
-            {queues.some((q) => q.jobCounts.active > 0) && (
-              <div className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
+            {totals.active > 0 && (
+              <div className="flex items-center gap-2 text-sm text-status-active">
                 <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-active opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-status-active" />
                 </span>
-                {queues.reduce((acc: number, q: Queue) => acc + q.jobCounts.active, 0)} jobs
-                processing
+                {formatNumber(totals.active)} jobs processing
               </div>
             )}
           </div>
@@ -275,14 +380,31 @@ function Dashboard() {
                     <Skeleton className="h-4 w-12" />
                     <Skeleton className="h-4 w-12" />
                     <Skeleton className="h-4 w-12" />
+                    <Skeleton className="h-4 w-12" />
                   </div>
                 ))}
               </div>
             </div>
-          ) : queues.length === 0 ? (
+          ) : (data?.totalUnfiltered ?? data?.total ?? 0) === 0 ? (
             <EmptyState />
           ) : (
-            <QueueTable queues={queues} />
+            <QueueTable
+              key={`${data?.page ?? 1}:${q}`}
+              queues={queues}
+              page={data?.page ?? 1}
+              totalPages={data?.totalPages ?? 1}
+              total={data?.total ?? 0}
+              isPlaceholderData={isPlaceholderData}
+              onPageChange={setPage}
+              sortBy={sortBy}
+              sortOrder={sortOrder}
+              onSortChange={handleSortChange}
+              search={q}
+              onSearchChange={handleSearchChange}
+              statusFilter={status}
+              onStatusFilterChange={handleStatusFilterChange}
+              onSaveDefaultView={isCurrentViewSaved ? undefined : handleSaveDefaultView}
+            />
           )}
         </div>
       </div>
@@ -290,7 +412,7 @@ function Dashboard() {
   )
 }
 
-type StatVariant = 'default' | 'blue' | 'green' | 'orange' | 'red'
+type StatVariant = 'default' | 'blue' | 'green' | 'orange' | 'red' | 'violet'
 
 interface StatCardProps {
   title: string
@@ -306,40 +428,32 @@ const variantStyles: Record<
   StatVariant,
   {
     icon: string
-    value: string
-    bg: string
-    border: string
+    accent: string
   }
 > = {
   default: {
     icon: 'text-muted-foreground',
-    value: 'text-foreground',
-    bg: 'bg-muted/50',
-    border: 'border-border',
+    accent: 'bg-status-neutral/40',
   },
   blue: {
-    icon: 'text-blue-500',
-    value: 'text-blue-600 dark:text-blue-400',
-    bg: 'bg-blue-500/5 dark:bg-blue-500/10',
-    border: 'border-blue-200 dark:border-blue-900',
+    icon: 'text-status-active',
+    accent: 'bg-status-active',
   },
   green: {
-    icon: 'text-green-500',
-    value: 'text-green-600 dark:text-green-400',
-    bg: 'bg-green-500/5 dark:bg-green-500/10',
-    border: 'border-green-200 dark:border-green-900',
+    icon: 'text-status-success',
+    accent: 'bg-status-success',
   },
   orange: {
-    icon: 'text-orange-500',
-    value: 'text-orange-600 dark:text-orange-400',
-    bg: 'bg-orange-500/5 dark:bg-orange-500/10',
-    border: 'border-orange-200 dark:border-orange-900',
+    icon: 'text-status-delayed',
+    accent: 'bg-status-delayed',
   },
   red: {
-    icon: 'text-red-500',
-    value: 'text-red-600 dark:text-red-400',
-    bg: 'bg-red-500/5 dark:bg-red-500/10',
-    border: 'border-red-200 dark:border-red-900',
+    icon: 'text-status-danger',
+    accent: 'bg-status-danger',
+  },
+  violet: {
+    icon: 'text-status-priority',
+    accent: 'bg-status-priority',
   },
 }
 
@@ -355,24 +469,25 @@ function StatCard({
   const styles = variantStyles[variant]
 
   const cardContent = (
-    <Card className={cn('transition-all hover:shadow-md', styles.bg, styles.border)}>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">{title}</CardTitle>
+    <Card className="relative overflow-hidden transition-shadow hover:shadow-md">
+      <span className={cn('absolute inset-x-0 top-0 h-0.5', styles.accent)} aria-hidden="true" />
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 p-4 pb-2">
+        <CardTitle className="eyebrow">{title}</CardTitle>
         <div className="relative">
           <Icon className={cn('h-4 w-4', styles.icon)} />
           {showPulse && (
             <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-active opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-status-active" />
             </span>
           )}
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="p-4 pt-0">
         {loading ? (
           <Skeleton className="h-8 w-20" />
         ) : (
-          <div className={cn('text-2xl font-bold tabular-nums', styles.value)}>
+          <div className="font-mono text-2xl font-semibold tracking-tight tabular-nums">
             {formatNumber(value)}
           </div>
         )}

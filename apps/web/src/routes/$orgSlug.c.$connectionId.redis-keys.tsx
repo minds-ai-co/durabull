@@ -10,14 +10,14 @@ interface RedisKeyInfo {
   memoryBytes?: number
 }
 
-import { AnalyticsEvents, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   AlertCircle,
   AlertTriangle,
   Braces,
   Check,
-  ChevronRight,
   Clock,
   Copy,
   Database,
@@ -32,6 +32,7 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  X,
   Zap,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -52,7 +53,12 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { useDeleteRedisKey, useRedisKeySearch, useRedisKeyValue } from '@/hooks/use-redis-keys'
+import {
+  type GetKeyValueResponse,
+  useDeleteRedisKey,
+  useRedisKeySearch,
+  useRedisKeyValue,
+} from '@/hooks/use-redis-keys'
 import { cn } from '@/lib/utils'
 
 // Helper to check if a key is a bull-related key
@@ -78,12 +84,12 @@ const typeIcons: Record<RedisDataType, React.ComponentType<{ className?: string 
 
 // Type colors
 const typeColors: Record<RedisDataType, string> = {
-  string: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20',
-  hash: 'text-violet-500 bg-violet-500/10 border-violet-500/20',
-  list: 'text-blue-500 bg-blue-500/10 border-blue-500/20',
-  set: 'text-amber-500 bg-amber-500/10 border-amber-500/20',
-  zset: 'text-orange-500 bg-orange-500/10 border-orange-500/20',
-  stream: 'text-pink-500 bg-pink-500/10 border-pink-500/20',
+  string: 'text-status-success bg-status-success/10 border-status-success/20',
+  hash: 'text-status-priority bg-status-priority/10 border-status-priority/20',
+  list: 'text-status-active bg-status-active/10 border-status-active/20',
+  set: 'text-status-warning bg-status-warning/10 border-status-warning/20',
+  zset: 'text-status-delayed bg-status-delayed/10 border-status-delayed/20',
+  stream: 'text-status-priority bg-status-priority/10 border-status-priority/20',
   none: 'text-gray-500 bg-gray-500/10 border-gray-500/20',
   unknown: 'text-gray-500 bg-gray-500/10 border-gray-500/20',
 }
@@ -112,10 +118,10 @@ function RedisKeysPage() {
     return () => clearTimeout(timer)
   }, [searchPattern])
 
-  // Reset selected key when pattern changes
+  // Reset selected key when the result set changes
   useEffect(() => {
     setSelectedKey(null)
-  }, [])
+  }, [debouncedPattern, excludeBullKeys])
 
   const {
     data,
@@ -202,9 +208,9 @@ function RedisKeysPage() {
   useAppTopBar(topBarConfig)
 
   return (
-    <div className="space-y-6 h-full">
+    <div className="flex h-full min-h-0 flex-col gap-6">
       {/* Stats Bar */}
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid shrink-0 gap-4 md:grid-cols-4">
         <StatCard
           title="Connection"
           value={currentConnection?.name ?? 'Not connected'}
@@ -229,9 +235,16 @@ function RedisKeysPage() {
       </div>
 
       {/* Main Content */}
-      <div className="grid gap-6 lg:grid-cols-[400px,1fr] h-[calc(100vh-320px)] min-h-[500px]">
-        {/* Left Panel - Key List */}
-        <Card className="flex flex-col overflow-hidden">
+      <div
+        className={cn(
+          'grid min-h-[500px] flex-1 gap-4 overflow-hidden',
+          selectedKey
+            ? 'grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]'
+            : 'grid-cols-1'
+        )}
+      >
+        {/* Key List */}
+        <Card className="flex min-h-0 min-w-0 flex-col overflow-hidden">
           <CardHeader className="border-b bg-muted/30 py-3 shrink-0">
             <div className="flex items-center justify-between gap-2">
               <CardTitle className="text-base font-medium flex items-center gap-2">
@@ -278,7 +291,8 @@ function RedisKeysPage() {
                       size="sm"
                       className={cn(
                         'h-7 text-xs gap-1.5 shrink-0',
-                        excludeBullKeys && 'bg-amber-500/10 text-amber-600 hover:bg-amber-500/20'
+                        excludeBullKeys &&
+                          'bg-status-warning/10 text-status-warning hover:bg-status-warning/20'
                       )}
                       onClick={() => {
                         const newValue = !excludeBullKeys
@@ -387,91 +401,15 @@ function RedisKeysPage() {
           </CardContent>
         </Card>
 
-        {/* Right Panel - Value Display */}
-        <Card className="flex flex-col overflow-hidden">
-          <CardHeader className="border-b bg-muted/30 py-3 shrink-0">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base font-medium flex items-center gap-2">
-                <Braces className="h-4 w-4 text-muted-foreground" />
-                Value
-              </CardTitle>
-              {keyValue && (
-                <div className="flex items-center gap-2">
-                  <TypeBadge type={keyValue.type} />
-                  {keyValue.ttl > 0 && (
-                    <Badge variant="outline" className="font-mono text-xs">
-                      <Clock className="h-3 w-3 mr-1" />
-                      TTL: {formatTTL(keyValue.ttl)}
-                    </Badge>
-                  )}
-                  {keyValue.memoryBytes && (
-                    <Badge variant="outline" className="font-mono text-xs">
-                      <MemoryStick className="h-3 w-3 mr-1" />
-                      {formatBytes(keyValue.memoryBytes)}
-                    </Badge>
-                  )}
-                </div>
-              )}
-            </div>
-            {selectedKey && (
-              <div className="mt-2 flex items-center gap-2">
-                <code className="text-sm font-mono bg-muted px-2 py-1 rounded flex-1 truncate">
-                  {selectedKey}
-                </code>
-                <CopyButton text={selectedKey} />
-              </div>
-            )}
-          </CardHeader>
-
-          <CardContent className="flex-1 p-4 overflow-auto">
-            {!selectedKey ? (
-              <div className="flex flex-col items-center justify-center h-full text-center">
-                <div className="rounded-full bg-muted p-6 mb-4">
-                  <ChevronRight className="h-8 w-8 text-muted-foreground" />
-                </div>
-                <h3 className="text-lg font-semibold mb-1">Select a key</h3>
-                <p className="text-sm text-muted-foreground max-w-sm">
-                  Click on a key from the list to view its value and details
-                </p>
-              </div>
-            ) : isLoadingValue ? (
-              <div className="flex flex-col items-center justify-center h-full">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-3" />
-                <p className="text-sm text-muted-foreground">Loading value...</p>
-              </div>
-            ) : isValueError ? (
-              <div className="flex flex-col items-center justify-center h-full text-center">
-                <div className="rounded-full bg-destructive/10 p-4 mb-3">
-                  <AlertCircle className="h-6 w-6 text-destructive" />
-                </div>
-                <p className="font-medium text-destructive">Failed to load value</p>
-                <p className="text-sm text-muted-foreground mt-1">
-                  The key may have been deleted or expired
-                </p>
-              </div>
-            ) : keyValue ? (
-              <div className="space-y-4">
-                {/* Collection length info */}
-                {keyValue.length !== undefined && (
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Badge variant="secondary">
-                      {keyValue.length.toLocaleString()} {keyValue.length === 1 ? 'item' : 'items'}
-                    </Badge>
-                    {keyValue.length > 100 && <span className="text-xs">(showing first 100)</span>}
-                  </div>
-                )}
-
-                {/* Value display */}
-                <JsonViewer
-                  data={keyValue.value}
-                  className="max-h-[calc(100vh-500px)]"
-                  initialExpanded={true}
-                  maxInitialDepth={3}
-                />
-              </div>
-            ) : null}
-          </CardContent>
-        </Card>
+        {selectedKey && (
+          <ValuePanel
+            selectedKey={selectedKey}
+            keyValue={keyValue}
+            isLoadingValue={isLoadingValue}
+            isValueError={isValueError}
+            onClose={() => setSelectedKey(null)}
+          />
+        )}
       </div>
 
       {/* Delete Confirmation Dialog */}
@@ -561,7 +499,7 @@ function KeyRow({ keyInfo, isSelected, onClick, onDelete, style }: KeyRowProps) 
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger>
-                  <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />
+                  <AlertTriangle className="h-3 w-3 text-status-warning shrink-0" />
                 </TooltipTrigger>
                 <TooltipContent>
                   <p>BullMQ managed key</p>
@@ -611,7 +549,7 @@ function KeyRow({ keyInfo, isSelected, onClick, onDelete, style }: KeyRowProps) 
           <TooltipContent className={cn(isBullManaged && 'max-w-xs')}>
             {isBullManaged ? (
               <div className="flex items-start gap-2">
-                <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+                <AlertTriangle className="h-4 w-4 text-status-warning shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium">Cannot delete BullMQ keys</p>
                   <p className="text-xs text-muted-foreground mt-1">
@@ -627,6 +565,107 @@ function KeyRow({ keyInfo, isSelected, onClick, onDelete, style }: KeyRowProps) 
         </Tooltip>
       </TooltipProvider>
     </div>
+  )
+}
+
+interface ValuePanelProps {
+  selectedKey: string
+  keyValue?: GetKeyValueResponse
+  isLoadingValue: boolean
+  isValueError: boolean
+  onClose: () => void
+}
+
+function ValuePanel({
+  selectedKey,
+  keyValue,
+  isLoadingValue,
+  isValueError,
+  onClose,
+}: ValuePanelProps) {
+  return (
+    <Card className="flex min-h-0 min-w-0 flex-col overflow-hidden animate-in slide-in-from-right-2 fade-in duration-200">
+      <CardHeader className="border-b bg-muted/30 py-3 shrink-0">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="text-base font-medium flex items-center gap-2">
+            <Braces className="h-4 w-4 text-muted-foreground" />
+            Value Details
+          </CardTitle>
+          <div className="flex min-w-0 items-center gap-2">
+            {keyValue && (
+              <>
+                <TypeBadge type={keyValue.type} />
+                {keyValue.ttl > 0 && (
+                  <Badge variant="outline" className="hidden font-mono text-xs sm:inline-flex">
+                    <Clock className="h-3 w-3 mr-1" />
+                    TTL: {formatTTL(keyValue.ttl)}
+                  </Badge>
+                )}
+                {keyValue.memoryBytes && (
+                  <Badge variant="outline" className="hidden font-mono text-xs xl:inline-flex">
+                    <MemoryStick className="h-3 w-3 mr-1" />
+                    {formatBytes(keyValue.memoryBytes)}
+                  </Badge>
+                )}
+              </>
+            )}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 shrink-0"
+                    onClick={onClose}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Close value panel</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <code className="text-sm font-mono bg-muted px-2 py-1 rounded flex-1 truncate">
+            {selectedKey}
+          </code>
+          <CopyButton text={selectedKey} />
+        </div>
+      </CardHeader>
+
+      <CardContent className="flex-1 overflow-auto p-4">
+        {isLoadingValue ? (
+          <div className="flex h-full flex-col items-center justify-center">
+            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-3" />
+            <p className="text-sm text-muted-foreground">Loading value...</p>
+          </div>
+        ) : isValueError ? (
+          <div className="flex h-full flex-col items-center justify-center text-center">
+            <div className="rounded-full bg-destructive/10 p-4 mb-3">
+              <AlertCircle className="h-6 w-6 text-destructive" />
+            </div>
+            <p className="font-medium text-destructive">Failed to load value</p>
+            <p className="text-sm text-muted-foreground mt-1">
+              The key may have been deleted or expired
+            </p>
+          </div>
+        ) : keyValue ? (
+          <div className="space-y-4">
+            {keyValue.length !== undefined && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Badge variant="secondary">
+                  {keyValue.length.toLocaleString()} {keyValue.length === 1 ? 'item' : 'items'}
+                </Badge>
+                {keyValue.length > 100 && <span className="text-xs">(showing first 100)</span>}
+              </div>
+            )}
+
+            <JsonViewer data={keyValue.value} initialExpanded={true} maxInitialDepth={3} />
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -662,7 +701,7 @@ function CopyButton({ text }: { text: string }) {
         <TooltipTrigger asChild>
           <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={handleCopy}>
             {copied ? (
-              <Check className="h-3.5 w-3.5 text-green-500" />
+              <Check className="h-3.5 w-3.5 text-status-success" />
             ) : (
               <Copy className="h-3.5 w-3.5" />
             )}
@@ -685,39 +724,26 @@ interface StatCardProps {
   variant?: StatVariant
 }
 
-const variantStyles: Record<
-  StatVariant,
-  { icon: string; value: string; bg: string; border: string }
-> = {
+const variantStyles: Record<StatVariant, { icon: string; accent: string }> = {
   default: {
     icon: 'text-muted-foreground',
-    value: 'text-foreground',
-    bg: 'bg-muted/50',
-    border: 'border-border',
+    accent: 'bg-status-neutral/40',
   },
   blue: {
-    icon: 'text-blue-500',
-    value: 'text-blue-600 dark:text-blue-400',
-    bg: 'bg-blue-500/5 dark:bg-blue-500/10',
-    border: 'border-blue-200 dark:border-blue-900',
+    icon: 'text-status-active',
+    accent: 'bg-status-active',
   },
   green: {
-    icon: 'text-green-500',
-    value: 'text-green-600 dark:text-green-400',
-    bg: 'bg-green-500/5 dark:bg-green-500/10',
-    border: 'border-green-200 dark:border-green-900',
+    icon: 'text-status-success',
+    accent: 'bg-status-success',
   },
   purple: {
-    icon: 'text-purple-500',
-    value: 'text-purple-600 dark:text-purple-400',
-    bg: 'bg-purple-500/5 dark:bg-purple-500/10',
-    border: 'border-purple-200 dark:border-purple-900',
+    icon: 'text-status-priority',
+    accent: 'bg-status-priority',
   },
   red: {
-    icon: 'text-red-500',
-    value: 'text-red-600 dark:text-red-400',
-    bg: 'bg-red-500/5 dark:bg-red-500/10',
-    border: 'border-red-200 dark:border-red-900',
+    icon: 'text-status-danger',
+    accent: 'bg-status-danger',
   },
 }
 
@@ -725,16 +751,19 @@ function StatCard({ title, value, icon: Icon, loading, variant = 'default' }: St
   const styles = variantStyles[variant]
 
   return (
-    <Card className={cn('transition-all hover:shadow-md', styles.bg, styles.border)}>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">{title}</CardTitle>
+    <Card className="relative overflow-hidden transition-shadow hover:shadow-md">
+      <span className={cn('absolute inset-x-0 top-0 h-0.5', styles.accent)} aria-hidden="true" />
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 p-4 pb-2">
+        <CardTitle className="eyebrow">{title}</CardTitle>
         <Icon className={cn('h-4 w-4', styles.icon)} />
       </CardHeader>
-      <CardContent>
+      <CardContent className="p-4 pt-0">
         {loading ? (
           <Skeleton className="h-7 w-24" />
         ) : (
-          <div className={cn('text-xl font-bold truncate', styles.value)}>{value}</div>
+          <div className="truncate font-mono text-xl font-semibold tracking-tight tabular-nums">
+            {value}
+          </div>
         )}
       </CardContent>
     </Card>

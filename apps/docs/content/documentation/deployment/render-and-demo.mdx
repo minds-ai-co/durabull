@@ -5,15 +5,23 @@ description: Deploy Durabull with Render blueprint and understand the automated 
 
 ## Render Blueprint
 
-Blueprint file:
-
-- `render.yaml`
-
-Services provisioned:
+Durabull Cloud uses a Render blueprint (maintained with the deployment; not always present in the public repository). Typical services:
 
 - `durabull` web service
 - `demo-redis` managed Redis (Render KV)
 - `seed-demo-account` cron job (every 12 hours)
+
+## MCP on Durabull Cloud
+
+The `durabull` web service exposes MCP on the **same hostname and port** as the API and web UI:
+
+```txt
+https://<your-app-domain>/mcp
+```
+
+There is no separate Render service or MCP port. Set `APP_BASE_URL` on the web service to the public HTTPS origin (for example `https://app.durabull.io`) so OAuth resource metadata advertises `{APP_BASE_URL}/mcp`.
+
+Post-deploy: [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md). Run `mcp:e2e` on **staging only** when validating auth changes — it registers OAuth clients and writes tokens to the database.
 
 ## Demo Refresh Pipeline
 
@@ -26,7 +34,7 @@ The cron job:
 
 Reference:
 
-- `DEMO_ACCOUNT_SETUP.md`
+- `tooling/scripts/seed-demo-account.ts` (cron invokes this script; see file header for `DURABULL_DEMO_ACCOUNT_REDIS_CONNECTION_STRING`)
 
 ## Demo Health Keys
 

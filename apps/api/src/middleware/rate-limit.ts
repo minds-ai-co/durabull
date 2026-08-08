@@ -4,6 +4,8 @@ import { extractBearerToken } from '@durabull/mcp/auth'
 import { env } from '@durabull/env'
 import { createMiddleware } from 'hono/factory'
 
+import { recordMcpTelemetry } from '../mcp/observability/mcp-telemetry'
+
 /**
  * Simple in-memory rate limiter.
  * For production with multiple instances, consider using Redis-backed rate limiting.
@@ -16,6 +18,11 @@ interface RateLimitEntry {
 
 // In-memory store for rate limiting
 const rateLimitStore = new Map<string, RateLimitEntry>()
+
+/** Test-only: clear in-memory counters between cases. */
+export function resetRateLimitStoreForTests(): void {
+  rateLimitStore.clear()
+}
 
 const GENERAL_API_RATE_LIMIT_WINDOW_MS = 60 * 1000
 const GENERAL_API_RATE_LIMIT_MAX_REQUESTS = 600
@@ -48,27 +55,43 @@ interface RateLimitOptions {
   ) => Response | Promise<Response>
 }
 
-/**
- * Get client identifier for rate limiting.
- * Uses X-Forwarded-For header (from reverse proxy) or falls back to a default.
- */
-function getClientKey(c: Parameters<ReturnType<typeof createMiddleware>>[0]): string {
-  // In production behind a reverse proxy, use X-Forwarded-For
-  const forwarded = c.req.header('x-forwarded-for')
-  if (forwarded) {
-    // Take the first IP (original client)
-    return forwarded.split(',')[0].trim()
-  }
+function isTrustedProxyEnvironment(): boolean {
+  if (env.TRUST_PROXY === true) return true
+  if (env.DURABULL_CLOUD === true) return true
+  return false
+}
 
-  // Fall back to CF-Connecting-IP (Cloudflare) or X-Real-IP
-  const cfIp = c.req.header('cf-connecting-ip')
+/**
+ * Resolve a client IP from forwarding headers when the deployment sits behind a trusted proxy.
+ * Ignores spoofable headers on direct or untrusted ingress so they cannot mint fresh rate-limit keys.
+ */
+function getTrustedClientIp(c: Parameters<ReturnType<typeof createMiddleware>>[0]): string | null {
+  if (!isTrustedProxyEnvironment()) return null
+
+  const cfIp = c.req.header('cf-connecting-ip')?.trim()
   if (cfIp) return cfIp
 
-  const realIp = c.req.header('x-real-ip')
+  const realIp = c.req.header('x-real-ip')?.trim()
   if (realIp) return realIp
 
-  // Last resort - this won't work well behind proxies
-  return 'unknown-client'
+  const forwarded = c.req.header('x-forwarded-for')
+  if (forwarded) {
+    const ips = forwarded
+      .split(',')
+      .map((ip) => ip.trim())
+      .filter(Boolean)
+    // Use the rightmost hop (appended by the trusted proxy), not the client-spoofable leftmost entry.
+    return ips.at(-1) ?? null
+  }
+
+  return null
+}
+
+/**
+ * Get client identifier for rate limiting.
+ */
+function getClientKey(c: Parameters<ReturnType<typeof createMiddleware>>[0]): string {
+  return getTrustedClientIp(c) ?? 'unknown-client'
 }
 
 /**
@@ -102,15 +125,6 @@ function shouldSkipRateLimiting(): boolean {
 }
 
 /**
- * Check if the client key indicates local/test traffic that shouldn't be rate limited.
- * This handles cases where environment variables aren't properly set.
- */
-function isLocalClient(clientKey: string): boolean {
-  // "unknown-client" means no forwarding headers - local development/testing
-  return clientKey === 'unknown-client'
-}
-
-/**
  * Creates a rate limiting middleware for Hono.
  */
 export function rateLimiter(options: RateLimitOptions) {
@@ -123,11 +137,6 @@ export function rateLimiter(options: RateLimitOptions) {
     }
 
     const clientKey = keyGenerator(c)
-
-    // Skip rate limiting for local clients (no forwarding headers = local dev/test)
-    if (isLocalClient(clientKey)) {
-      return next()
-    }
     const key = `${keyPrefix}:${clientKey}`
     const now = Date.now()
 
@@ -211,7 +220,7 @@ export const apiRateLimiter = rateLimiter({
         error: 'Too Many Requests',
         code: 'RATE_LIMITED',
         message: 'Rate limit exceeded. Please slow down.',
-        retryAfter: 10,
+        retryAfter: Math.ceil(GENERAL_API_RATE_LIMIT_WINDOW_MS / 1000),
       },
       429
     ),
@@ -256,11 +265,7 @@ function mcpIngressRateLimitKey(c: Parameters<ReturnType<typeof createMiddleware
     return `bearer:${createHash('sha256').update(bearerToken).digest('hex').slice(0, 24)}`
   }
 
-  const cfIp = c.req.header('cf-connecting-ip')
-  if (cfIp) return cfIp
-  const realIp = c.req.header('x-real-ip')
-  if (realIp) return realIp
-  return 'mcp-anonymous'
+  return getTrustedClientIp(c) ?? 'mcp-anonymous'
 }
 
 /** Stricter limit for dynamic MCP OAuth client registration. */
@@ -286,8 +291,9 @@ export const mcpRateLimiter = rateLimiter({
   limit: 120,
   keyPrefix: 'rl:mcp',
   keyGenerator: mcpIngressRateLimitKey,
-  onRateLimit: (c) =>
-    c.json(
+  onRateLimit: (c) => {
+    recordMcpTelemetry({ signal: 'rate_limited_ingress' })
+    return c.json(
       {
         error: 'Too Many Requests',
         code: 'RATE_LIMITED',
@@ -295,5 +301,6 @@ export const mcpRateLimiter = rateLimiter({
         retryAfter: 60,
       },
       429
-    ),
+    )
+  },
 })

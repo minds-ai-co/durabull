@@ -43,7 +43,7 @@ Derive from deployment config:
 
 ### ADR alignment note
 
-`docs/adr/0001-mcp-security-architecture.md` decision #1 originally referenced a dedicated `apps/mcp` deployable. **Phase 1 supersedes deployable placement only:** MCP remains a distinct **security/module boundary**, but ingress is the API app. Update the ADR in the same PR that lands API-mounted MCP if the ADR text still says separate service.
+Deployable placement is documented in **ADR-0001** (`docs/adr/0001-mcp-security-architecture.md`, Accepted): unified API `/mcp` ingress, not standalone `apps/mcp`.
 
 ---
 
@@ -78,6 +78,20 @@ Every incoming agent must complete this before writing code.
 - [ ] Define required test commands before coding.
 - [ ] Define specific evidence to attach in PR description.
 - [ ] Define rollback or mitigation for the changed area.
+
+---
+
+## Implementation Status Snapshot (2026-05-28)
+
+- [x] Step 1 complete: MCP module + `/mcp` transport ingress on unified API app (PR-02 merged).
+- [x] Step 2 complete: OAuth discovery + token validation middleware (PR-03 merged).
+- [x] Step 3 complete: principal resolver + policy engine (PR-04 merged).
+- [x] Step 4 complete: read-only diagnostic tool catalog (PR-05 merged).
+- [x] Step 5 complete: redaction, rate limits, audit expansion, telemetry (PR-06 merged).
+- [x] Step 6 complete: deployment docs, operator runbooks (PR-07 merged — PR #99).
+- [x] Step 7 complete: GA closure artifacts (PR-08 — ADR, compliance, security closure, release checklist).
+- [ ] §13 step 4 (optional): shared domain service adapters (`packages/mcp-domain`) — deferred; tools use API handlers (see §2.2).
+- [ ] Operator gate: staging `mcp:e2e` + human security sign-off before production announcement (see `docs/mcp-ga-release-checklist.md`).
 
 ---
 
@@ -527,7 +541,7 @@ Return:
 - per principal
 - per tool
 - burst + sustained windows
-- shared backend (not in-memory only) for multi-replica deployments
+- shared backend for multi-replica deployments (**phase 2** — phase 1 uses in-memory per-process limits)
 
 ### 10.2 Timeouts and Backpressure
 
@@ -573,10 +587,9 @@ Audit event on every tool call:
 - Same single-container / single-process model as cloud (API entrypoint only).
 - MCP available at `{APP_BASE_URL}/mcp` on the published app port (default `3000`).
 - Do not publish a separate `MCP_PORT` in compose unless running a deprecated experimental layout.
-- Feature flags:
-  - enable/disable MCP surface via env (for example `DURABULL_MCP_ENABLED`, define in PR-07)
-  - default read-only mode on
-  - explicit operator opt-in for future write scopes
+- MCP is always available at `{APP_BASE_URL}/mcp` when the API process runs (no separate enable flag in phase 1).
+- default read-only mode on
+- explicit operator opt-in for future write scopes (phase 2)
 - Hardening guidance:
   - TLS at reverse proxy
   - private network placement for Redis/Postgres
@@ -611,6 +624,8 @@ Audit event on every tool call:
 
 ### 12.4 Performance Tests
 
+Deferred post-GA (not a phase-1 merge gate). Track via draft SLOs in `docs/mcp-ga-release-checklist.md` after staging soak:
+
 - log-heavy pagination
 - stacktrace retrieval
 - concurrent read tool traffic
@@ -635,15 +650,9 @@ Do not mark phase complete until:
 6. add redaction + rate limiting + audit
 7. deployment + runbooks + final compliance verification (single-service docs; remove any `apps/mcp` / dual-process leftovers)
 
-### 13.1 If legacy `apps/mcp` scaffold exists
+### 13.1 Historical: legacy `apps/mcp` scaffold (completed PR-02)
 
-Some branches may contain an experimental standalone `apps/mcp` package. Before continuing PR-03+:
-
-1. Move transport/tool code into `packages/mcp/` (keep `apps/api/src/mcp/` as thin mount only).
-2. Mount `/mcp` in `createApiApp()`.
-3. Port tests to `apps/api` (request `/mcp` on `createApiApp()`).
-4. Remove standalone `apps/mcp` entrypoint and dual-process Docker runner.
-5. Amend ADR deployable wording if still stale.
+Completed on `main`: transport in `packages/mcp/`, thin mount at `apps/api/src/mcp/`, no dual-process Docker MCP port. ADR-0001 reflects unified placement.
 
 ---
 
@@ -658,11 +667,13 @@ Some branches may contain an experimental standalone `apps/mcp` package. Before 
 
 ## 15) Delivery Sign-Off Checklist
 
-- [ ] MCP transport spec behavior validated
-- [ ] OAuth/resource audience validation enforced
-- [ ] least-privilege scopes implemented
-- [ ] org and connection boundary checks enforced
-- [ ] tool outputs sanitized/redacted
-- [ ] audit logging operational
-- [ ] cloud and self-host docs complete (unified deployment; `{APP_BASE_URL}/mcp`)
-- [ ] sequential PR playbook updated with actual PR links/status
+- [x] MCP transport spec behavior validated — see `docs/mcp-ga-compliance-checklist.md`
+- [x] OAuth/resource audience validation enforced
+- [x] least-privilege scopes implemented
+- [x] org and connection boundary checks enforced
+- [x] tool outputs sanitized/redacted
+- [x] audit logging operational
+- [x] cloud and self-host docs complete (unified deployment; `{APP_BASE_URL}/mcp`)
+- [x] sequential PR playbook updated with actual PR links/status
+- [x] ADR-0001 published at `docs/adr/0001-mcp-security-architecture.md`
+- [ ] staging `mcp:e2e` + production release checklist executed per `docs/mcp-ga-release-checklist.md`

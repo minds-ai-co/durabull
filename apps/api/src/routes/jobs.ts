@@ -22,8 +22,32 @@ const CLEAR_RETENTION_SCHEMA = z.object({
   keepMostRecent: z.number().int().min(0).default(0),
 })
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function parseNonNegativeInt(value: string | undefined): number | null {
+  if (value === undefined) return null
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null
+}
+
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Substring match against the job's serialized data payload (e.g. a `message`
+// field nested anywhere in the payload). Case-insensitive.
+function jobDataMatches(data: unknown, search: string): boolean {
+  try {
+    return JSON.stringify(data ?? {})
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  } catch {
+    return false
+  }
 }
 
 async function removeJobWithRetries(
@@ -87,6 +111,7 @@ const app = new Hono()
     const status = c.req.query('status')
     const name = c.req.query('name')
     const jobId = c.req.query('jobId')?.trim()
+    const dataSearch = c.req.query('data')?.trim()
     const pageStr = c.req.query('page')
     const cursorStr = c.req.query('cursor')
     const pageSizeStr = c.req.query('pageSize')
@@ -98,7 +123,13 @@ const app = new Hono()
       Number.isInteger(cursor) && cursor !== null ? Math.max(0, cursor) : (page - 1) * pageSize
     const end = start + pageSize - 1
 
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
 
     if (jobId) {
       const job = await queue.getJob(jobId)
@@ -106,7 +137,11 @@ const app = new Hono()
       if (job) {
         const state = await job.getState()
 
-        if ((status && state !== status) || (name && !job.name.toLowerCase().includes(name.toLowerCase()))) {
+        if (
+          (status && state !== status) ||
+          (name && !job.name.toLowerCase().includes(name.toLowerCase())) ||
+          (dataSearch && !jobDataMatches(job.data, dataSearch))
+        ) {
           return c.json({
             jobs: [],
             total: 0,
@@ -166,12 +201,15 @@ const app = new Hono()
       states = [status as JobState]
     }
 
-    const needsClientFilter = !!(name || jobId)
+    const needsClientFilter = !!(name || jobId || dataSearch)
 
     if (needsClientFilter) {
       // Fetch each state separately so we know the status without per-job getState() calls,
       // then return all filtered results in one response for client-side pagination.
-      const jobsWithState: Array<{ job: NonNullable<Awaited<ReturnType<typeof queue.getJobs>>[number]>; state: JobState }> = []
+      const jobsWithState: Array<{
+        job: NonNullable<Awaited<ReturnType<typeof queue.getJobs>>[number]>
+        state: JobState
+      }> = []
       for (const state of states) {
         const stateJobs = await queue.getJobs([state])
         for (const job of stateJobs) {
@@ -182,11 +220,7 @@ const app = new Hono()
       }
 
       const filtered = jobsWithState
-        .filter(({ job }) =>
-          name
-            ? job.name.toLowerCase().includes(name.toLowerCase())
-            : true
-        )
+        .filter(({ job }) => (name ? job.name.toLowerCase().includes(name.toLowerCase()) : true))
         .filter(({ job }) =>
           jobId
             ? String(job.id ?? '')
@@ -194,6 +228,7 @@ const app = new Hono()
                 .includes(jobId.toLowerCase())
             : true
         )
+        .filter(({ job }) => (dataSearch ? jobDataMatches(job.data, dataSearch) : true))
 
       const mappedJobs = filtered.map(({ job, state }) => ({
         id: job.id ?? '',
@@ -273,7 +308,13 @@ const app = new Hono()
     const queueName = c.req.param('queueName')
     const jobId = c.req.param('jobId')
 
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     const job = await queue.getJob(jobId)
 
     if (!job) {
@@ -327,7 +368,13 @@ const app = new Hono()
       MAX_PAGE_SIZE
     )
 
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     const job = await queue.getJob(jobId)
 
     if (!job) {
@@ -370,16 +417,40 @@ const app = new Hono()
     const jobId = c.req.param('jobId')
     const pageStr = c.req.query('page')
     const pageSizeStr = c.req.query('pageSize')
+    const startStr = c.req.query('start')
 
-    const page = pageStr ? parseInt(pageStr, 10) : 1
-    const pageSize = Math.min(
-      pageSizeStr ? parseInt(pageSizeStr, 10) : DEFAULT_PAGE_SIZE,
-      MAX_PAGE_SIZE
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
     )
+
+    // Offset-tail mode: return up to MAX_PAGE_SIZE lines from an absolute
+    // index, used by the retry dialog to stream lines appended after a retry.
+    if (startStr !== undefined) {
+      const startOffset = parseNonNegativeInt(startStr)
+      if (startOffset === null) {
+        return c.json({ error: 'start must be a non-negative integer' }, 400)
+      }
+
+      const logs = await queue.getJobLogs(jobId, startOffset, startOffset + MAX_PAGE_SIZE - 1)
+      const count = logs.count ?? 0
+
+      return c.json({
+        logs: logs.logs ?? [],
+        count,
+        start: startOffset,
+        hasMore: startOffset + (logs.logs?.length ?? 0) < count,
+      })
+    }
+
+    const page = parsePositiveInt(pageStr, 1)
+    const pageSize = Math.min(parsePositiveInt(pageSizeStr, DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
     const start = (page - 1) * pageSize
     const end = start + pageSize - 1
 
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
     // BullMQ getJobLogs accepts start and end parameters for pagination
     const logs = await queue.getJobLogs(jobId, start, end)
 
@@ -402,7 +473,13 @@ const app = new Hono()
     const jobId = c.req.param('jobId')
     const keepMostRecent = 0
 
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     const job = await queue.getJob(jobId)
 
     if (!job) {
@@ -472,12 +549,18 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const jobId = c.req.param('jobId')
       const { keepMostRecent } = c.req.valid('json')
 
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
       const job = await queue.getJob(jobId)
 
       if (!job) {
@@ -544,12 +627,18 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const jobId = c.req.param('jobId')
       const { keepMostRecent } = c.req.valid('json')
 
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
       const job = await queue.getJob(jobId)
 
       if (!job) {
@@ -618,11 +707,17 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const { jobIds, statuses } = c.req.valid('json')
 
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
       let success = 0
       let failed = 0
       const errors: Array<{ jobId: string; error: string }> = []
@@ -748,11 +843,17 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const { jobIds, removeScheduler } = c.req.valid('json')
 
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
       let success = 0
       let schedulersRemoved = 0
       const errors: Array<{ jobId: string; error: string }> = []
@@ -853,11 +954,17 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const { jobIds, jobData } = c.req.valid('json')
 
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
       let success = 0
       const errors: Array<{ jobId: string; error: string }> = []
 
@@ -896,11 +1003,17 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const { name, data, ...options } = c.req.valid('json')
 
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
       const job = await queue.add(name, data, buildQueueAddOptions(options))
 
       return c.json({

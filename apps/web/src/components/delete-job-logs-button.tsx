@@ -1,4 +1,5 @@
-import { AnalyticsEvents, DialogType, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents, AnalyticsProperties, DialogType } from '@durabull/analytics/events'
 import { AlertTriangle, ChevronDown, Loader2, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
@@ -136,7 +137,7 @@ export function DeleteJobLogsButton({ queueName, jobId, logCount }: DeleteJobLog
         open={confirmOpen}
         onOpenChange={(newOpen) => {
           trackEvent(newOpen ? AnalyticsEvents.DIALOG_OPENED : AnalyticsEvents.DIALOG_CLOSED, {
-            dialog_type: DialogType.DELETE_JOB_LOGS,
+            [AnalyticsProperties.DIALOG_TYPE]: DialogType.DELETE_JOB_LOGS,
           })
           setConfirmOpen(newOpen)
         }}

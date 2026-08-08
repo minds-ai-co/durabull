@@ -276,10 +276,12 @@ test.describe("Pages", () => {
     await ensureActiveOrg(page);
     await page.goto("/settings");
 
+    await page.waitForURL(new RegExp(`/${TEST_ORG_SLUG}/settings/connections`));
+    await expect(page.getByText("Settings", { exact: true }).first()).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "Settings", exact: true, level: 1 })
+      page.getByRole("heading", { name: "Connections", exact: true, level: 1 })
     ).toBeVisible();
-    await expect(page.getByText("Manage your account settings")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Connections" })).toBeVisible();
   });
 
   test("invite page shows not found for invalid id", async ({ page }) => {
@@ -289,7 +291,7 @@ test.describe("Pages", () => {
     ).toBeVisible();
   });
 
-  test("failed job retry returns job to queue", async ({ page }) => {
+  test("failed job retry streams status in modal and requeues job", async ({ page }) => {
     const { connectionId } = await getConnectionAndQueue(page);
     const failedJob = await findJobByStatus(page, connectionId, "failed");
 
@@ -300,8 +302,28 @@ test.describe("Pages", () => {
     await expect(retryButton).toBeVisible();
     await retryButton.click();
 
-    await page.waitForURL(
-      new RegExp(`/${TEST_ORG_SLUG}/c/${connectionId}/queues/${failedJob.queueName}`)
+    // The modal requeues the job and starts polling status + logs. Depending
+    // on whether a worker picks the job up, it shows the live running phase
+    // or jumps straight to a terminal phase - all of them render the log
+    // stream pane.
+    await expect(
+      page.getByRole("heading", {
+        name: /Job Running|Waiting for Retry|Job Completed|Job Failed/,
+      })
+    ).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId("retry-log-stream")).toBeVisible();
+
+    // The modal is closable at any point; the job keeps running server-side.
+    const dialog = page.getByRole("dialog");
+    await dialog
+      .getByRole("button", { name: /^(Close|Done)$/ })
+      .first()
+      .click();
+    await expect(dialog).not.toBeVisible();
+    await expect(page).toHaveURL(
+      new RegExp(
+        `/${TEST_ORG_SLUG}/c/${connectionId}/queues/${failedJob.queueName}/jobs/${failedJob.jobId}`
+      )
     );
 
     await expect

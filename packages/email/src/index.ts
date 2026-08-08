@@ -1,12 +1,16 @@
+import { env } from '@durabull/env'
 import { render } from '@react-email/components'
 import { getResendClient, isEmailConfigured } from './client'
 import { AlertEmail, type AlertEmailProps } from './templates/alert'
 import { InviteEmail, type InviteEmailProps } from './templates/invite'
 
 /**
- * The from address for all Durabull emails.
+ * Options for configuring email sending.
  */
-const FROM_EMAIL = 'Durabull <no-reply@durabull.io>'
+export interface EmailOptions {
+  /** Base URL of the application (e.g., https://durabull.io) */
+  baseUrl: string
+}
 
 /**
  * Data passed from better-auth's organization plugin when an invitation is created.
@@ -49,14 +53,6 @@ export interface InvitationEmailData {
   }
 }
 
-/**
- * Options for configuring email sending.
- */
-export interface EmailOptions {
-  /** Base URL of the application (e.g., https://durabull.io) */
-  baseUrl: string
-}
-
 export type { AlertEmailProps }
 
 export async function sendAlertNotificationEmail(
@@ -73,7 +69,7 @@ export async function sendAlertNotificationEmail(
   const resend = getResendClient()
 
   const { error } = await resend.emails.send({
-    from: FROM_EMAIL,
+    from: env.EMAIL_FROM,
     to,
     subject: `Alert: ${props.summary}`,
     html,
@@ -120,7 +116,7 @@ export function createInvitationEmailSender(options: EmailOptions) {
     const resend = getResendClient()
 
     const { error } = await resend.emails.send({
-      from: FROM_EMAIL,
+      from: env.EMAIL_FROM,
       to: data.email,
       subject: `You've been invited to join ${data.organization.name} on Durabull`,
       html,

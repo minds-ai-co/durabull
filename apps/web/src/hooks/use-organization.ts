@@ -1,9 +1,9 @@
 import {
-  AnalyticsEvents,
   identifyOrganization,
   trackEvent,
   trackOrganizationCreated,
-} from '@durabull/analytics'
+} from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { organization } from '@durabull/auth/client'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -86,6 +86,12 @@ export interface Organization {
  * Member role type
  */
 export type MemberRole = 'owner' | 'admin' | 'member'
+
+export const MEMBER_ROLES = {
+  OWNER: 'owner',
+  ADMIN: 'admin',
+  MEMBER: 'member',
+} as const satisfies Record<'OWNER' | 'ADMIN' | 'MEMBER', MemberRole>
 
 /**
  * Invitation status type
