@@ -1,0 +1,124 @@
+{
+  "name": "minds-durabull-internal",
+  "region": "fra",
+  "alerts": [
+    { "rule": "DEPLOYMENT_FAILED" }
+  ],
+  "services": [
+    {
+      "name": "durabull",
+      "image": {
+        "registry_type": "GHCR",
+        "registry": "durabullhq",
+        "repository": "durabull",
+        "tag": "v1.17.0"
+      },
+      "instance_size_slug": "apps-s-1vcpu-1gb",
+      "instance_count": 1,
+      "internal_ports": [3000],
+      "health_check": {
+        "http_path": "/api/health",
+        "port": 3000,
+        "initial_delay_seconds": 45,
+        "period_seconds": 10,
+        "timeout_seconds": 5,
+        "success_threshold": 1,
+        "failure_threshold": 6
+      },
+      "envs": [
+        {
+          "key": "NODE_ENV",
+          "value": "production",
+          "scope": "RUN_TIME"
+        },
+        {
+          "key": "DURABULL_AUTHLESS",
+          "value": "true",
+          "scope": "RUN_TIME"
+        },
+        {
+          "key": "MCP_AUTHLESS_BEARER_TOKEN",
+          "value": "__DURABULL_MCP_AUTHLESS_BEARER__",
+          "scope": "RUN_TIME",
+          "type": "SECRET"
+        },
+        {
+          "key": "DURABULL_ENV_CONNECTIONS",
+          "value": "true",
+          "scope": "RUN_TIME"
+        },
+        {
+          "key": "DURABULL_REDIS_URL_ENCRYPTION_KEY",
+          "value": "__DURABULL_REDIS_URL_ENCRYPTION_KEY__",
+          "scope": "RUN_TIME",
+          "type": "SECRET"
+        },
+        {
+          "key": "DURABULL_SECRET_ENCRYPTION_KEY",
+          "value": "__DURABULL_SECRET_ENCRYPTION_KEY__",
+          "scope": "RUN_TIME",
+          "type": "SECRET"
+        },
+        {
+          "key": "DURABULL_REDIS_URL_PRODUCTION",
+          "value": "__DURABULL_PRODUCTION_REDIS_URL__",
+          "scope": "RUN_TIME",
+          "type": "SECRET"
+        },
+        {
+          "key": "DURABULL_REDIS_URL_PRODUCTION_ENVIRONMENT",
+          "value": "production",
+          "scope": "RUN_TIME"
+        },
+        {
+          "key": "DURABULL_REDIS_URL_STAGING",
+          "value": "__DURABULL_STAGING_REDIS_URL__",
+          "scope": "RUN_TIME",
+          "type": "SECRET"
+        },
+        {
+          "key": "DURABULL_REDIS_URL_STAGING_ENVIRONMENT",
+          "value": "staging",
+          "scope": "RUN_TIME"
+        },
+        {
+          "key": "DURABULL_REDIS_URL_DEFAULT",
+          "value": "PRODUCTION",
+          "scope": "RUN_TIME"
+        },
+        {
+          "key": "APP_BASE_URL",
+          "value": "https://durabull.getminds.ai",
+          "scope": "RUN_TIME"
+        },
+        {
+          "key": "VITE_PUBLIC_APP_URL",
+          "value": "https://durabull.getminds.ai",
+          "scope": "RUN_TIME"
+        }
+      ]
+    }
+  ],
+  "workers": [
+    {
+      "name": "cloudflared",
+      "image": {
+        "registry_type": "DOCKER_HUB",
+        "registry": "cloudflare",
+        "repository": "cloudflared",
+        "tag": "2026.7.2"
+      },
+      "instance_size_slug": "apps-s-1vcpu-0.5gb",
+      "instance_count": 1,
+      "run_command": "tunnel --no-autoupdate run",
+      "envs": [
+        {
+          "key": "TUNNEL_TOKEN",
+          "value": "__CLOUDFLARE_TUNNEL_TOKEN__",
+          "scope": "RUN_TIME",
+          "type": "SECRET"
+        }
+      ]
+    }
+  ]
+}

@@ -21,6 +21,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate standalone deployment spec
+        run: |
+          chmod +x deploy/render-digitalocean-spec.sh deploy/check-digitalocean-spec.sh
+          deploy/check-digitalocean-spec.sh
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:

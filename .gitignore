@@ -15,6 +15,7 @@ release/
 .env.keys
 .env.local
 .env.docker
+deploy/digitalocean-app.rendered.json
 
 # Editor
 .idea/
