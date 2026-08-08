@@ -1,4 +1,5 @@
-import { AnalyticsEvents, DialogType, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents, AnalyticsProperties, DialogType } from '@durabull/analytics/events'
 import { Copy, Loader2, Play } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
@@ -112,7 +113,7 @@ export function DuplicateJobDialog({
       open={open}
       onOpenChange={(newOpen) => {
         trackEvent(newOpen ? AnalyticsEvents.DIALOG_OPENED : AnalyticsEvents.DIALOG_CLOSED, {
-          dialog_type: DialogType.DUPLICATE_JOB,
+          [AnalyticsProperties.DIALOG_TYPE]: DialogType.DUPLICATE_JOB,
         })
         onOpenChange(newOpen)
       }}

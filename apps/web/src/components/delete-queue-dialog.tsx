@@ -1,4 +1,5 @@
-import { AnalyticsEvents, DialogType, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents, AnalyticsProperties, DialogType } from '@durabull/analytics/events'
 import { useState, useEffect } from 'react'
 import { AlertTriangle, Trash2, Loader2 } from 'lucide-react'
 import { useNavigate } from '@tanstack/react-router'
@@ -59,11 +60,11 @@ export function DeleteQueueDialog({ queueName, open, onOpenChange }: DeleteQueue
       onOpenChange={(newOpen) => {
         if (newOpen) {
           trackEvent(AnalyticsEvents.DIALOG_OPENED, {
-            dialog_type: DialogType.DELETE_QUEUE,
+            [AnalyticsProperties.DIALOG_TYPE]: DialogType.DELETE_QUEUE,
           })
         } else {
           trackEvent(AnalyticsEvents.DIALOG_CLOSED, {
-            dialog_type: DialogType.DELETE_QUEUE,
+            [AnalyticsProperties.DIALOG_TYPE]: DialogType.DELETE_QUEUE,
           })
         }
         onOpenChange(newOpen)
@@ -95,13 +96,11 @@ export function DeleteQueueDialog({ queueName, open, onOpenChange }: DeleteQueue
               <span className="text-sm">Checking queue status...</span>
             </div>
           ) : !canDelete ? (
-            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
+            <div className="rounded-lg border border-status-warning/20 bg-status-warning/5 p-4">
               <div className="flex items-start gap-3">
-                <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+                <AlertTriangle className="h-5 w-5 text-status-warning shrink-0 mt-0.5" />
                 <div>
-                  <p className="font-medium text-amber-600 dark:text-amber-400">
-                    Queue cannot be deleted
-                  </p>
+                  <p className="font-medium text-status-warning">Queue cannot be deleted</p>
                   <p className="text-sm text-muted-foreground mt-1">
                     This queue contains <span className="font-semibold">{totalJobs}</span> job
                     {totalJobs !== 1 ? 's' : ''} that must be removed first.
@@ -117,7 +116,7 @@ export function DeleteQueueDialog({ queueName, open, onOpenChange }: DeleteQueue
                       {canDeleteData.jobCounts.active > 0 && (
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">Active:</span>
-                          <span className="font-medium text-blue-600">
+                          <span className="font-medium text-status-active">
                             {canDeleteData.jobCounts.active}
                           </span>
                         </div>
@@ -125,7 +124,7 @@ export function DeleteQueueDialog({ queueName, open, onOpenChange }: DeleteQueue
                       {canDeleteData.jobCounts.delayed > 0 && (
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">Delayed:</span>
-                          <span className="font-medium text-orange-600">
+                          <span className="font-medium text-status-delayed">
                             {canDeleteData.jobCounts.delayed}
                           </span>
                         </div>
@@ -133,7 +132,7 @@ export function DeleteQueueDialog({ queueName, open, onOpenChange }: DeleteQueue
                       {canDeleteData.jobCounts.failed > 0 && (
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">Failed:</span>
-                          <span className="font-medium text-red-600">
+                          <span className="font-medium text-status-danger">
                             {canDeleteData.jobCounts.failed}
                           </span>
                         </div>

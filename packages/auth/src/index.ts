@@ -7,6 +7,7 @@ import {
   oauthConsent,
   organizationSchema,
   user,
+  type NewOauthAccessToken,
 } from '@durabull/dal'
 import { env } from '@durabull/env'
 import { betterAuth } from 'better-auth'
@@ -15,7 +16,10 @@ import { mcp, organization } from 'better-auth/plugins'
 import {
   getCanonicalMcpResourceUri,
   MCP_PHASE1_SCOPES,
+  MCP_OAUTH_SCOPES_SUPPORTED,
+  normalizeResourceUri,
 } from '@durabull/mcp/auth'
+import { MCP_OAUTH_CONSENT_PATH } from './mcp-consent'
 
 const isProduction = env.NODE_ENV === 'production'
 
@@ -199,11 +203,27 @@ export async function createAuth(options?: CreateAuthOptions) {
       },
       oauthAccessToken: {
         create: {
-          after: async (token: { id: string; resource: string | null }) => {
+          before: async (token: NewOauthAccessToken) => {
             const canonicalResource = getCanonicalMcpResourceUri(
               options?.baseURL ?? env.APP_BASE_URL
             )
-            if (token.resource === canonicalResource) {
+            const normalizedResource = normalizeResourceUri(token.resource ?? canonicalResource)
+            return {
+              data: {
+                ...token,
+                resource: normalizedResource,
+              },
+            }
+          },
+          after: async (token: { id: string; resource: string | null }) => {
+            const canonicalResource = normalizeResourceUri(
+              getCanonicalMcpResourceUri(
+                options?.baseURL ?? env.APP_BASE_URL
+              )
+            )
+
+            // Better Auth may occasionally persist null `resource` on MCP tokens; patch only that case.
+            if (typeof token.resource === 'string' && token.resource.trim().length > 0) {
               return
             }
 
@@ -231,15 +251,10 @@ export async function createAuth(options?: CreateAuthOptions) {
         resource: getCanonicalMcpResourceUri(options?.baseURL ?? env.APP_BASE_URL),
         oidcConfig: {
           loginPage: '/login',
+          consentPage: MCP_OAUTH_CONSENT_PATH,
           scopes: [...MCP_PHASE1_SCOPES],
           metadata: {
-            scopes_supported: [
-              'openid',
-              'profile',
-              'email',
-              'offline_access',
-              ...MCP_PHASE1_SCOPES,
-            ],
+            scopes_supported: [...MCP_OAUTH_SCOPES_SUPPORTED],
           },
         },
       }),

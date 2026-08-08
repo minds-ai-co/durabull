@@ -205,4 +205,90 @@ describe('createMcpRoutes', () => {
     }
     expect(callPayload.result?.content?.[0]?.text).toBe('pong')
   })
+
+  it('returns isError envelope for typed tool not_found errors', async () => {
+    class NotFoundToolError extends Error {
+      readonly code = 'not_found'
+    }
+
+    const appWithReadTool = createMcpRoutes({
+      version: 'test',
+      allowedHosts: new Set(['localhost', '127.0.0.1', 'localhost:3000']),
+      corsOrigins: ['http://localhost:3000'],
+      middleware: [createTestAuthMiddleware()],
+      requestContextResolver: () => ({
+        principal: {
+          type: 'delegated_user',
+          principalId: 'principal-test',
+          userId: 'user',
+        },
+        correlationId: 'corr-test',
+      }),
+      readTools: {
+        listConnections: async () => {
+          throw new NotFoundToolError('Connection missing for test')
+        },
+      },
+    })
+
+    const postMcpReadTool = (
+      body: Parameters<typeof postMcpJson>[2],
+      options?: Parameters<typeof postMcpJson>[3]
+    ) =>
+      postMcpJson((path, init) => Promise.resolve(appWithReadTool.request(path, init)), '/', body, {
+        authorization: validAuthorization,
+        ...options,
+      })
+
+    const initResponse = await postMcpReadTool({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'test', version: '1.0.0' },
+      },
+    })
+
+    const sessionId = initResponse.headers.get('mcp-session-id')
+    expect(sessionId).toBeTruthy()
+
+    await postMcpReadTool(
+      {
+        jsonrpc: MCP_JSON_RPC_VERSION,
+        method: 'notifications/initialized',
+      },
+      { sessionId: sessionId ?? undefined }
+    )
+
+    const callResponse = await postMcpReadTool(
+      {
+        jsonrpc: MCP_JSON_RPC_VERSION,
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'list_connections',
+          arguments: {
+            pageSize: 10,
+          },
+        },
+      },
+      { sessionId: sessionId ?? undefined }
+    )
+
+    expect(callResponse.status).toBe(200)
+    const payload = (await readMcpJsonResponse(callResponse)) as {
+      result?: {
+        isError?: boolean
+        content?: Array<{ type: string; text?: string }>
+      }
+    }
+    expect(payload.result?.isError).toBe(true)
+    const errorPayload = JSON.parse(payload.result?.content?.[0]?.text ?? '{}') as {
+      error?: { code?: string; message?: string }
+    }
+    expect(errorPayload.error?.code).toBe('not_found')
+    expect(errorPayload.error?.message).toBe('Resource not found.')
+  })
 })

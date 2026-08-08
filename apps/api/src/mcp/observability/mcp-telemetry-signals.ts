@@ -1,0 +1,12 @@
+export type McpTelemetrySignal =
+  | 'auth_missing_bearer'
+  | 'auth_unauthorized'
+  | 'auth_forbidden'
+  | 'policy_denied'
+  | 'rate_limited_ingress'
+  | 'rate_limited_tool'
+  | 'tool_success'
+  | 'tool_error'
+  | 'redaction_applied'
+  | 'audit_dropped'
+  | 'audit_write_failed'

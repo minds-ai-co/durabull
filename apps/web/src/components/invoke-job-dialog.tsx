@@ -1,7 +1,8 @@
 import { Loader2, Zap } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { AnalyticsEvents, DialogType, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents, AnalyticsProperties, DialogType } from '@durabull/analytics/events'
 import { JsonEditor } from '@/components/json-editor'
 import { Button } from '@/components/ui/button'
 import {
@@ -81,7 +82,7 @@ export function InvokeJobDialog({
       open={open}
       onOpenChange={(newOpen) => {
         trackEvent(newOpen ? AnalyticsEvents.DIALOG_OPENED : AnalyticsEvents.DIALOG_CLOSED, {
-          dialog_type: DialogType.INVOKE_JOB,
+          [AnalyticsProperties.DIALOG_TYPE]: DialogType.INVOKE_JOB,
         })
         onOpenChange(newOpen)
       }}

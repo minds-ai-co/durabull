@@ -13,6 +13,9 @@ export const MCP_PHASE1_SCOPES = [
   MCP_SCOPE_DIAGNOSTICS_READ,
 ] as const
 
+export const OIDC_CORE_SCOPES = ['openid', 'profile', 'email', 'offline_access'] as const
+export const MCP_OAUTH_SCOPES_SUPPORTED = [...OIDC_CORE_SCOPES, ...MCP_PHASE1_SCOPES] as const
+
 export type McpPhase1Scope = (typeof MCP_PHASE1_SCOPES)[number]
 
 /** Minimum scope required to use MCP transport (initialize, tools/list, ping). */

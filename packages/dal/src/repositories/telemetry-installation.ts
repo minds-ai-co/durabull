@@ -6,27 +6,25 @@ import { telemetryInstallation } from '../db/schemas/telemetry-installation/sche
 const DEFAULT_TELEMETRY_INSTALLATION_ID = 'default'
 
 export const telemetryInstallationRepository = {
-  async getOrCreateAnonymousInstanceId(): Promise<string> {
+  async readAnonymousInstanceId(): Promise<string | null> {
     const db = await getDb()
-    const now = new Date()
-
     const existing = await db
       .select({ anonymousInstanceId: telemetryInstallation.anonymousInstanceId })
       .from(telemetryInstallation)
       .where(eq(telemetryInstallation.id, DEFAULT_TELEMETRY_INSTALLATION_ID))
       .limit(1)
 
-    if (existing[0]) {
-      await db
-        .update(telemetryInstallation)
-        .set({
-          lastSeenAt: now,
-          updatedAt: now,
-        })
-        .where(eq(telemetryInstallation.id, DEFAULT_TELEMETRY_INSTALLATION_ID))
+    return existing[0]?.anonymousInstanceId ?? null
+  },
 
-      return existing[0].anonymousInstanceId
+  async getOrCreateAnonymousInstanceId(): Promise<string> {
+    const existingId = await this.readAnonymousInstanceId()
+    if (existingId) {
+      return existingId
     }
+
+    const db = await getDb()
+    const now = new Date()
 
     const [created] = await db
       .insert(telemetryInstallation)

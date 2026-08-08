@@ -4,7 +4,8 @@ import type { Context } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 
 import { MCP_JSON_RPC_VERSION } from '../constants'
-import { createMcpServer } from '../server/create-mcp-server'
+import { runWithMcpRequestContext, type McpRequestContext } from '../request-context'
+import { createMcpServer, type CreateMcpServerOptions } from '../server/create-mcp-server'
 
 const MAX_ACTIVE_SESSIONS = 256
 
@@ -17,6 +18,15 @@ interface McpSessionEntry {
 export interface McpSessionRegistryOptions {
   version: string
   allowedHosts: ReadonlySet<string>
+  serverOptions?: Omit<CreateMcpServerOptions, 'version'>
+}
+
+function getCachedJsonBody(c: Context): unknown {
+  try {
+    return c.get('mcpRequestJsonBody' as never)
+  } catch {
+    return undefined
+  }
 }
 
 export function createMcpSessionRegistry(options: McpSessionRegistryOptions) {
@@ -36,7 +46,7 @@ export function createMcpSessionRegistry(options: McpSessionRegistryOptions) {
   }
 
   function createSessionEntry(): McpSessionEntry {
-    const server = createMcpServer({ version: options.version })
+    const server = createMcpServer({ version: options.version, ...options.serverOptions })
     let entry: McpSessionEntry
 
     const transport = new StreamableHTTPTransport({
@@ -65,6 +75,11 @@ export function createMcpSessionRegistry(options: McpSessionRegistryOptions) {
       return false
     }
 
+    const cachedBody = getCachedJsonBody(c)
+    if (cachedBody && typeof cachedBody === 'object' && !Array.isArray(cachedBody)) {
+      return (cachedBody as { method?: string }).method === 'initialize'
+    }
+
     try {
       const body = (await c.req.raw.clone().json()) as { method?: string }
       return body.method === 'initialize'
@@ -84,7 +99,10 @@ export function createMcpSessionRegistry(options: McpSessionRegistryOptions) {
     }
   }
 
-  async function handleRequest(c: Context): Promise<Response | undefined> {
+  async function handleRequest(
+    c: Context,
+    requestContext?: McpRequestContext
+  ): Promise<Response | undefined> {
     const sessionId = c.req.header('mcp-session-id')
 
     try {
@@ -95,7 +113,7 @@ export function createMcpSessionRegistry(options: McpSessionRegistryOptions) {
         }
 
         await session.connected
-        return session.transport.handleRequest(c)
+        return runWithMcpRequestContext(requestContext, () => session.transport.handleRequest(c))
       }
 
       const isInitialize = await requestIsInitialize(c)
@@ -110,7 +128,7 @@ export function createMcpSessionRegistry(options: McpSessionRegistryOptions) {
       await evictOldestSessionIfNeeded()
       const session = createSessionEntry()
       await session.connected
-      return session.transport.handleRequest(c)
+      return runWithMcpRequestContext(requestContext, () => session.transport.handleRequest(c))
     } catch (error) {
       if (error instanceof HTTPException) {
         throw error

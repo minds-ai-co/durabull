@@ -1,22 +1,12 @@
 import { missingScopes, tokenHasScopes } from './scopes'
 import type { McpAccessTokenClaims, McpTokenValidationResult } from './types'
+import { normalizeResourceUri } from './normalize-resource-uri'
 
 export interface ValidateMcpAccessTokenOptions {
   canonicalResourceUri: string
   requiredScopes: readonly string[]
   /** When true, tokens must include a resource indicator matching the canonical URI. */
   requireResourceIndicator?: boolean
-}
-
-function normalizeResourceUri(uri: string): string {
-  try {
-    const url = new URL(uri)
-    url.hash = ''
-    const pathname = url.pathname.replace(/\/+$/, '') || '/'
-    return `${url.origin}${pathname}`
-  } catch {
-    return uri.replace(/\/+$/, '')
-  }
 }
 
 export function extractBearerToken(authorizationHeader: string | undefined): string | null {

@@ -1,4 +1,5 @@
-import { AnalyticsEvents, AuthMethod, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents, AuthMethod } from '@durabull/analytics/events'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { AlertCircle, Github, Loader2, UserPlus } from 'lucide-react'
 import { useState } from 'react'

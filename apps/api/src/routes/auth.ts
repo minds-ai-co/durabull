@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
+import { env } from '@durabull/env'
 import { getAuth } from '../lib/auth'
 import { getAuthlessContext, isAuthlessMode } from '../lib/authless'
+import { ensureMcpAuthorizeScopes } from './mcp-authorize-scopes'
 
 const app = new Hono()
 
@@ -35,7 +37,13 @@ app.all('/*', async (c) => {
   }
 
   const auth = await getAuth()
-  return auth.handler(c.req.raw)
+  const rewrittenUrl = ensureMcpAuthorizeScopes(new URL(c.req.url), env.APP_BASE_URL)
+  if (rewrittenUrl.toString() === c.req.url) {
+    return auth.handler(c.req.raw)
+  }
+
+  const rewrittenRequest = new Request(rewrittenUrl.toString(), c.req.raw)
+  return auth.handler(rewrittenRequest)
 })
 
 export default app

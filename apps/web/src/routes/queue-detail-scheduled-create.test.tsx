@@ -50,11 +50,14 @@ vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => navigateMock,
 }))
 
-vi.mock('@durabull/analytics', () => ({
+vi.mock('@durabull/analytics/browser', () => ({
+  trackEvent: trackEventMock,
+}))
+
+vi.mock('@durabull/analytics/events', () => ({
   AnalyticsEvents: {
     QUEUE_VIEWED: 'QUEUE_VIEWED',
   },
-  trackEvent: trackEventMock,
 }))
 
 vi.mock('@/components/app-top-bar', () => ({

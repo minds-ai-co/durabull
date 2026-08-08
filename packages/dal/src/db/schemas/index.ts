@@ -18,6 +18,22 @@ export type { AlertEvent, NewAlertEvent } from './alert-event/types'
 // Alert Rule schema exports
 export { type AlertRuleType, alertRule, alertRuleTypes } from './alert-rule/schema'
 export type { AlertRule, NewAlertRule } from './alert-rule/types'
+// Alert Destination schema exports
+export {
+  type AlertDestinationConfig,
+  type AlertDestinationType,
+  type AlertEmailDestinationConfig,
+  type AlertLinearDestinationConfig,
+  alertDestination,
+  alertDestinationTypes,
+  alertWebhookDestination,
+} from './alert-destination/schema'
+export type {
+  AlertDestination,
+  AlertWebhookDestination,
+  NewAlertDestination,
+  NewAlertWebhookDestination,
+} from './alert-destination/types'
 // Auth schema exports
 export { authAccount, authSession, authVerification } from './auth/schema'
 export type {
@@ -47,6 +63,24 @@ export type {
 } from './linear-job-issue-event/types'
 export { linearOauthState } from './linear-oauth-state/schema'
 export type { LinearOauthState, NewLinearOauthState } from './linear-oauth-state/types'
+export {
+  type McpPrincipalType,
+  mcpAuditEvent,
+  mcpPolicyBinding,
+  mcpPrincipalTypes,
+  mcpServiceAccount,
+  mcpServiceAccountSecret,
+} from './mcp-policy/schema'
+export type {
+  McpAuditEvent,
+  McpPolicyBinding,
+  McpServiceAccount,
+  McpServiceAccountSecret,
+  NewMcpAuditEvent,
+  NewMcpPolicyBinding,
+  NewMcpServiceAccount,
+  NewMcpServiceAccountSecret,
+} from './mcp-policy/types'
 export { oauthAccessToken, oauthApplication, oauthConsent } from './oauth-mcp/schema'
 export type {
   NewOauthAccessToken,

@@ -1,4 +1,5 @@
-import { AnalyticsEvents, DialogType, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents, AnalyticsProperties, DialogType } from '@durabull/analytics/events'
 import { Loader2, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
@@ -189,7 +190,7 @@ export function PurgeQueueDialog({
       open={open}
       onOpenChange={(newOpen) => {
         trackEvent(newOpen ? AnalyticsEvents.DIALOG_OPENED : AnalyticsEvents.DIALOG_CLOSED, {
-          dialog_type: DialogType.PURGE_QUEUE,
+          [AnalyticsProperties.DIALOG_TYPE]: DialogType.PURGE_QUEUE,
         })
         onOpenChange(newOpen)
       }}

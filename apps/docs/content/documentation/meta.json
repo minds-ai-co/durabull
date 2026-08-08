@@ -30,6 +30,7 @@
     "workflows/naming-best-practices",
     "workflows/log-formatting-and-highlighting",
     "---Integrations---",
+    "integrations/mcp-server",
     "integrations/linear",
     "---Reference---",
     "reference/http-api",

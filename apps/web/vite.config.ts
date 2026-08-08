@@ -56,6 +56,15 @@ export default defineConfig({
         target: 'http://localhost:3001',
         changeOrigin: true,
       },
+      // MCP + OAuth discovery (same origin as APP_BASE_URL in local dev)
+      '/mcp': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/.well-known': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
       // PostHog proxy traffic always goes through the API server.
       '/ingest': {
         target: 'http://localhost:3001',

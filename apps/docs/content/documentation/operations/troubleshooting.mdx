@@ -82,8 +82,22 @@ Checks:
 
 - high burst traffic against auth/API routes
 - whether `DISABLE_RATE_LIMIT` is intentionally configured in non-production
+- for MCP (when `NODE_ENV=production`): ingress **120/min** on all `/mcp` HTTP traffic; per-tool **60/min** (**30/min** for heavy diagnostic tools) — see [MCP Server](/documentation/integrations/mcp-server)
 
-### 7. Redis Explorer Delete Blocked
+### 7. MCP Client Cannot Connect (`/mcp`)
+
+Symptoms:
+
+- MCP IDE returns `401`, `403`, or `429` on `{APP_BASE_URL}/mcp`
+- OAuth succeeds for API but MCP tools fail
+
+Quick checks: `APP_BASE_URL` matches client origin; PRM `resource` = `{APP_BASE_URL}/mcp`; required scopes and service-account bindings.
+
+Full triage: [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md) and [MCP OAuth operator guide](https://github.com/durabullhq/durabull/blob/main/docs/mcp-oauth-operator.md).
+
+Automated smoke (`mcp:e2e`) is for **staging/local only** — it registers OAuth clients and inserts DB tokens. Do not run against production.
+
+### 8. Redis Explorer Delete Blocked
 
 Symptom:
 

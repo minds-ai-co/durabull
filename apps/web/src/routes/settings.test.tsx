@@ -18,44 +18,8 @@ const mocks = vi.hoisted(() => ({
     defaultPriority: number | null
     lastValidatedAt: string | null
   },
-  listAccounts: vi.fn(),
   saveLinearIntegrationMutateAsync: vi.fn(),
   testLinearIntegrationMutateAsync: vi.fn(),
-  trackEvent: vi.fn(),
-}))
-
-vi.mock('@tanstack/react-router', () => ({
-  createFileRoute: () => (options: unknown) => ({
-    options,
-  }),
-}))
-
-vi.mock('@durabull/analytics', () => ({
-  AnalyticsEvents: {
-    DIALOG_CLOSED: 'DIALOG_CLOSED',
-    DIALOG_OPENED: 'DIALOG_OPENED',
-    USER_ACCOUNT_LINKED: 'USER_ACCOUNT_LINKED',
-    USER_ACCOUNT_UNLINKED: 'USER_ACCOUNT_UNLINKED',
-  },
-  DialogType: {
-    UNLINK_ACCOUNT: 'UNLINK_ACCOUNT',
-  },
-  trackEvent: mocks.trackEvent,
-}))
-
-vi.mock('@/components/app-top-bar', () => ({
-  useAppTopBar: vi.fn(),
-}))
-
-vi.mock('@/hooks/use-app-config', () => ({
-  useAppConfig: () => ({
-    config: {
-      telemetry: {
-        collectionRequired: true,
-        disclosureUrl: 'https://durabull.io/privacy',
-      },
-    },
-  }),
 }))
 
 vi.mock('@/hooks/use-alerts', () => ({
@@ -78,62 +42,41 @@ vi.mock('@/hooks/use-alerts', () => ({
   }),
 }))
 
-vi.mock('@/hooks/use-auth', () => ({
-  linkSocial: vi.fn(),
-  listAccounts: mocks.listAccounts,
-  unlinkAccount: vi.fn(),
-  useAuth: () => ({
-    user: {
-      id: 'user-1',
-      email: 'test@example.com',
-    },
-    isLoading: false,
-  }),
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({
+    children,
+    to,
+    params: _params,
+    ...props
+  }: {
+    children?: React.ReactNode
+    to?: string
+  } & Record<string, unknown>) => (
+    <a href={String(to ?? '#')} {...props}>
+      {children}
+    </a>
+  ),
 }))
 
-vi.mock('@/lib/app-version', () => ({
-  APP_BUILD_INFO: {
-    version: '1.2.3-test',
-    buildId: 'test-build',
-    buildTime: null,
-  },
-}))
+import { IntegrationsSettingsPanel } from '@/components/settings/integrations-settings-panel'
 
-import { Route } from '@/routes/settings'
-
-describe('SettingsPage', () => {
+describe('IntegrationsSettingsPanel', () => {
   beforeEach(() => {
-    window.sessionStorage.clear()
     mocks.connectLinearIntegrationMutateAsync.mockReset()
     mocks.connectLinearIntegrationMutateAsync.mockResolvedValue({
       authorizationUrl: 'https://linear.app/oauth/authorize?state=test',
     })
     mocks.deleteLinearIntegrationMutateAsync.mockReset()
     mocks.linearIntegration = null
-    mocks.listAccounts.mockReset()
-    mocks.listAccounts.mockResolvedValue({ data: [] })
     mocks.saveLinearIntegrationMutateAsync.mockReset()
     mocks.testLinearIntegrationMutateAsync.mockReset()
-    mocks.trackEvent.mockReset()
   })
 
-  it('shows the current app version quietly on the settings page', () => {
-    const Component = Route.options.component as () => React.ReactNode
-
-    render(<Component />)
-
-    expect(screen.getByText('Durabull v1.2.3-test')).toBeInTheDocument()
-  })
-
-  it('only shows the Linear connect action before OAuth is configured', async () => {
-    const Component = Route.options.component as () => React.ReactNode
+  it('shows the Linear connect action before OAuth is configured', async () => {
     mocks.connectLinearIntegrationMutateAsync.mockImplementation(() => new Promise(() => {}))
+    render(<IntegrationsSettingsPanel orgSlug="acme" />)
 
-    render(<Component />)
-
-    expect(
-      screen.queryByRole('textbox', { name: /default linear team id/i })
-    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: /default linear team/i })).not.toBeInTheDocument()
 
     const connectButton = screen.getByRole('button', { name: /connect linear/i })
     expect(connectButton).toBeEnabled()
@@ -160,11 +103,10 @@ describe('SettingsPage', () => {
     mocks.saveLinearIntegrationMutateAsync.mockResolvedValue({
       integration: mocks.linearIntegration,
     })
-    const Component = Route.options.component as () => React.ReactNode
 
-    render(<Component />)
+    render(<IntegrationsSettingsPanel orgSlug="acme" />)
 
-    const teamInput = screen.getByRole('textbox', { name: /default linear team id/i })
+    const teamInput = screen.getByRole('textbox', { name: /default linear team/i })
     expect(teamInput).toHaveValue('')
     fireEvent.change(teamInput, { target: { value: 'team-456' } })
     fireEvent.click(screen.getByRole('button', { name: /save defaults/i }))

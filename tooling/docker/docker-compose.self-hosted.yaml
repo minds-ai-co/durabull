@@ -1,13 +1,21 @@
+# Durabull self-hosted Compose — API, web, and MCP on one port (default 3000).
+# MCP endpoint: {APP_BASE_URL}/mcp (no separate MCP_PORT).
+# Defaults to OAuth mode (DURABULL_AUTHLESS=false): set BETTER_AUTH_SECRET.
+# Authless lab: set DURABULL_AUTHLESS=true + MCP_AUTHLESS_BEARER_TOKEN; BETTER_AUTH_SECRET is still required here — use a long random value.
+# Redis is not published to the host (internal network only).
+
 name: durabull-self-hosted
 
 services:
   durabull:
+    # Pin a version tag in production (avoid mutable :latest).
     image: "${DURABULL_IMAGE:-ghcr.io/durabullhq/durabull:latest}"
     restart: unless-stopped
     ports:
       - "${DURABULL_APP_PORT:-3000}:3000"
     environment:
       DURABULL_AUTHLESS: "${DURABULL_AUTHLESS:-false}"
+      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?set a long random secret (required for this Compose file)}"
       MCP_AUTHLESS_BEARER_TOKEN: "${MCP_AUTHLESS_BEARER_TOKEN:-}"
       DURABULL_ENV_CONNECTIONS: "${DURABULL_ENV_CONNECTIONS:-true}"
       DURABULL_REDIS_URL_ENCRYPTION_KEY: "${DURABULL_REDIS_URL_ENCRYPTION_KEY:?set a 32-byte key with 'openssl rand -hex 32'}"
@@ -25,8 +33,9 @@ services:
   redis:
     image: redis:8-alpine
     restart: unless-stopped
-    ports:
-      - "${DURABULL_REDIS_PORT:-6379}:6379"
+    # Internal network only — do not publish Redis to the host in production.
+    # For production, add Redis AUTH/ACL at the infrastructure layer; this file does not set requirepass.
+    # For local Redis CLI debugging, temporarily add: ports: ["127.0.0.1:6379:6379"]
     volumes:
       - redis_data:/data
     healthcheck:

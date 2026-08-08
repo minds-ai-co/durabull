@@ -1,7 +1,14 @@
-import { AnalyticsEvents, trackEvent } from '@durabull/analytics'
+import { trackEvent } from '@durabull/analytics/browser'
+import { AnalyticsEvents } from '@durabull/analytics/events'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
+  Bookmark,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsUpDown,
   ExternalLink,
   Eye,
   EyeOff,
@@ -9,8 +16,21 @@ import {
   MoreHorizontal,
   Pause,
   Play,
+  Rocket,
+  Search,
+  X,
 } from 'lucide-react'
-import { type KeyboardEvent, memo, type MouseEvent, useCallback, useMemo, useState } from 'react'
+import {
+  type ChangeEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { useConnection } from '@/components/connection-provider'
 import { QueueNameTag } from '@/components/queue-name-tag'
 import { StatusIndicator } from '@/components/status-badge'
@@ -22,6 +42,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -31,7 +53,13 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { usePauseQueue, useResumeQueue } from '@/hooks/use-queues'
+import {
+  type QueueSortField,
+  type QueueSortOrder,
+  type QueueStatusFilter,
+  usePauseQueue,
+  useResumeQueue,
+} from '@/hooks/use-queues'
 import { QUEUE_STATUS } from '@/lib/constants'
 import { cn, formatNumber } from '@/lib/utils'
 
@@ -55,6 +83,91 @@ interface QueueSummary {
 interface QueueTableProps {
   queues: QueueSummary[]
   className?: string
+  page?: number
+  totalPages?: number
+  total?: number
+  isPlaceholderData?: boolean
+  onPageChange?: (page: number) => void
+  sortBy?: QueueSortField
+  sortOrder?: QueueSortOrder
+  onSortChange?: (sortBy: QueueSortField, sortOrder: QueueSortOrder) => void
+  search?: string
+  onSearchChange?: (search: string) => void
+  statusFilter?: QueueStatusFilter | ''
+  onStatusFilterChange?: (status: QueueStatusFilter | '') => void
+  /** When provided, renders a "Save as default" action for the current view */
+  onSaveDefaultView?: () => void
+}
+
+const SEARCH_DEBOUNCE_MS = 300
+
+interface SortableColumn {
+  field: QueueSortField
+  label: string
+  align?: 'right'
+  /** Numeric columns sort descending on first click (largest values first) */
+  defaultOrder: QueueSortOrder
+}
+
+const SORTABLE_COLUMNS: SortableColumn[] = [
+  { field: 'name', label: 'Queue', defaultOrder: 'asc' },
+  { field: 'status', label: 'Status', defaultOrder: 'asc' },
+  { field: 'waiting', label: 'Waiting', align: 'right', defaultOrder: 'desc' },
+  { field: 'prioritized', label: 'Prioritized', align: 'right', defaultOrder: 'desc' },
+  { field: 'active', label: 'Active', align: 'right', defaultOrder: 'desc' },
+  { field: 'delayed', label: 'Delayed', align: 'right', defaultOrder: 'desc' },
+  { field: 'completed', label: 'Completed', align: 'right', defaultOrder: 'desc' },
+  { field: 'failed', label: 'Failed', align: 'right', defaultOrder: 'desc' },
+]
+
+interface SortableHeadProps {
+  column: SortableColumn
+  sortBy: QueueSortField
+  sortOrder: QueueSortOrder
+  onSortChange?: (sortBy: QueueSortField, sortOrder: QueueSortOrder) => void
+}
+
+function SortableHead({ column, sortBy, sortOrder, onSortChange }: SortableHeadProps) {
+  const isActive = sortBy === column.field
+  const ariaSort = isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : 'none'
+
+  const handleClick = () => {
+    const nextOrder: QueueSortOrder = isActive
+      ? sortOrder === 'asc'
+        ? 'desc'
+        : 'asc'
+      : column.defaultOrder
+    trackEvent(AnalyticsEvents.QUEUE_LIST_SORTED, {
+      sort_by: column.field,
+      sort_order: nextOrder,
+    })
+    onSortChange?.(column.field, nextOrder)
+  }
+
+  return (
+    <TableHead aria-sort={ariaSort} className={column.align === 'right' ? 'text-right' : undefined}>
+      <button
+        type="button"
+        onClick={handleClick}
+        className={cn(
+          'inline-flex items-center gap-1 -mx-1 rounded px-1 py-0.5 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30',
+          column.align === 'right' && 'flex-row-reverse',
+          isActive ? 'text-foreground font-medium' : 'text-muted-foreground'
+        )}
+      >
+        {column.label}
+        {isActive ? (
+          sortOrder === 'asc' ? (
+            <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+          ) : (
+            <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+          )
+        ) : (
+          <ChevronsUpDown className="h-3.5 w-3.5 opacity-50" aria-hidden="true" />
+        )}
+      </button>
+    </TableHead>
+  )
 }
 
 /**
@@ -64,6 +177,7 @@ function getTotalJobs(queue: QueueSummary): number {
   const { jobCounts } = queue
   return (
     jobCounts.waiting +
+    jobCounts.prioritized +
     jobCounts.active +
     jobCounts.delayed +
     jobCounts.completed +
@@ -71,8 +185,41 @@ function getTotalJobs(queue: QueueSummary): number {
   )
 }
 
-export function QueueTable({ queues, className }: QueueTableProps) {
+export function QueueTable({
+  queues,
+  className,
+  page = 1,
+  totalPages = 1,
+  total = 0,
+  isPlaceholderData,
+  onPageChange,
+  sortBy = 'name',
+  sortOrder = 'asc',
+  onSortChange,
+  search = '',
+  onSearchChange,
+  statusFilter = '',
+  onStatusFilterChange,
+  onSaveDefaultView,
+}: QueueTableProps) {
   const [hideEmpty, setHideEmpty] = useState(false)
+  const [searchInput, setSearchInput] = useState(search)
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const hasPagination = totalPages > 1
+  const hasServerFilters = search !== '' || statusFilter !== ''
+
+  useEffect(() => {
+    setHideEmpty(false)
+  }, [page])
+
+  // Keep the input in sync when search is changed externally (e.g. URL navigation)
+  useEffect(() => {
+    setSearchInput(search)
+  }, [search])
+
+  useEffect(() => {
+    return () => clearTimeout(searchDebounceRef.current)
+  }, [])
 
   // Memoize filtered queues to avoid recalculating on unrelated re-renders
   const { filteredQueues, emptyCount } = useMemo(() => {
@@ -91,53 +238,197 @@ export function QueueTable({ queues, className }: QueueTableProps) {
     })
   }, [])
 
+  const handleSearchInput = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const value = event.target.value
+      setSearchInput(value)
+      clearTimeout(searchDebounceRef.current)
+      searchDebounceRef.current = setTimeout(() => {
+        trackEvent(AnalyticsEvents.QUEUE_LIST_FILTERED, { filter: 'search' })
+        onSearchChange?.(value)
+      }, SEARCH_DEBOUNCE_MS)
+    },
+    [onSearchChange]
+  )
+
+  const handleClearSearch = useCallback(() => {
+    clearTimeout(searchDebounceRef.current)
+    setSearchInput('')
+    onSearchChange?.('')
+  }, [onSearchChange])
+
+  const handleStatusFilterChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      const value = event.target.value as QueueStatusFilter | ''
+      trackEvent(AnalyticsEvents.QUEUE_LIST_FILTERED, {
+        filter: 'status',
+        status: value || 'all',
+      })
+      onStatusFilterChange?.(value)
+    },
+    [onStatusFilterChange]
+  )
+
+  const handleClearFilters = useCallback(() => {
+    handleClearSearch()
+    onStatusFilterChange?.('')
+  }, [handleClearSearch, onStatusFilterChange])
+
   return (
     <TooltipProvider delayDuration={200}>
-      <div className={cn('rounded-lg border bg-card', className)}>
-        <Table>
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              <TableHead>Queue</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Waiting</TableHead>
-              <TableHead className="text-right">Active</TableHead>
-              <TableHead className="text-right">Delayed</TableHead>
-              <TableHead className="text-right">Completed</TableHead>
-              <TableHead className="text-right">Failed</TableHead>
-              <TableHead className="w-[60px]"></TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {filteredQueues.map((queue) => (
-              <QueueTableRow key={queue.name} queue={queue} />
-            ))}
-          </TableBody>
-        </Table>
-
-        {/* Empty queues toggle */}
-        {emptyCount > 0 && (
-          <div className="border-t px-4 py-3 flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">
-              {emptyCount} empty queue{emptyCount !== 1 ? 's' : ''}
-            </span>
+      <div
+        className={cn(
+          'rounded-lg border bg-card overflow-hidden flex flex-col h-[calc(100vh-18rem)]',
+          className
+        )}
+      >
+        {/* Toolbar: search + status filter */}
+        <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
+          <div className="relative w-full max-w-xs">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              type="search"
+              value={searchInput}
+              onChange={handleSearchInput}
+              placeholder="Filter queues by name…"
+              aria-label="Filter queues by name"
+              className="h-9 pl-8 [&::-webkit-search-cancel-button]:hidden"
+            />
+            {searchInput !== '' && (
+              <button
+                type="button"
+                onClick={handleClearSearch}
+                aria-label="Clear search"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+          <Select
+            value={statusFilter}
+            onChange={handleStatusFilterChange}
+            aria-label="Filter queues by status"
+            className="w-36"
+          >
+            <option value="">All statuses</option>
+            <option value="active">Active</option>
+            <option value="paused">Paused</option>
+          </Select>
+          {hasServerFilters && (
             <Button
               variant="ghost"
               size="sm"
-              onClick={toggleHideEmpty}
+              onClick={handleClearFilters}
               className="text-muted-foreground hover:text-foreground"
             >
-              {hideEmpty ? (
-                <>
-                  <Eye className="mr-2 h-4 w-4" />
-                  Show empty
-                </>
-              ) : (
-                <>
-                  <EyeOff className="mr-2 h-4 w-4" />
-                  Hide empty
-                </>
-              )}
+              <X className="mr-1.5 h-4 w-4" />
+              Clear filters
             </Button>
+          )}
+          {onSaveDefaultView && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="sm" onClick={onSaveDefaultView} className="ml-auto">
+                  <Bookmark className="mr-1.5 h-4 w-4" />
+                  Save as default
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                Use the current sorting and filters as your default view
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-auto min-h-0 [&>div]:overflow-visible">
+          <Table>
+            <TableHeader className="sticky top-0 z-10 bg-card">
+              <TableRow className="hover:bg-transparent">
+                {SORTABLE_COLUMNS.map((column) => (
+                  <SortableHead
+                    key={column.field}
+                    column={column}
+                    sortBy={sortBy}
+                    sortOrder={sortOrder}
+                    onSortChange={onSortChange}
+                  />
+                ))}
+                <TableHead className="w-[60px]"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filteredQueues.length === 0 ? (
+                <TableRow className="hover:bg-transparent">
+                  <TableCell colSpan={9} className="h-32 text-center text-muted-foreground">
+                    {hasServerFilters
+                      ? 'No queues match the current filters.'
+                      : 'No queues to display.'}
+                  </TableCell>
+                </TableRow>
+              ) : (
+                filteredQueues.map((queue) => <QueueTableRow key={queue.name} queue={queue} />)
+              )}
+            </TableBody>
+          </Table>
+        </div>
+
+        {/* Footer: empty toggle + pagination */}
+        {(emptyCount > 0 || hasPagination) && (
+          <div className="border-t px-4 py-3 flex items-center justify-between">
+            <div>
+              {emptyCount > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={toggleHideEmpty}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  {hideEmpty ? (
+                    <>
+                      <Eye className="mr-2 h-4 w-4" />
+                      Show empty
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff className="mr-2 h-4 w-4" />
+                      Hide empty
+                    </>
+                  )}
+                </Button>
+              )}
+            </div>
+
+            {hasPagination && (
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-muted-foreground">
+                  Page {page} of {totalPages}
+                  <span className="hidden sm:inline"> ({total} queues)</span>
+                </span>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-8 w-8"
+                    disabled={page <= 1 || isPlaceholderData}
+                    onClick={() => onPageChange?.(page - 1)}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    <span className="sr-only">Previous page</span>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-8 w-8"
+                    disabled={page >= totalPages || isPlaceholderData}
+                    onClick={() => onPageChange?.(page + 1)}
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                    <span className="sr-only">Next page</span>
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -259,18 +550,31 @@ const QueueTableRow = memo(function QueueTableRow({ queue }: QueueTableRowProps)
       </TableCell>
 
       {/* Waiting */}
-      <TableCell className="text-right tabular-nums text-muted-foreground">
+      <TableCell className="text-right font-mono text-[13px] tabular-nums text-muted-foreground">
         {formatNumber(queue.jobCounts.waiting)}
+      </TableCell>
+
+      {/* Prioritized */}
+      <TableCell className="text-right">
+        <span
+          className={cn(
+            'inline-flex items-center gap-1.5 font-mono text-[13px] tabular-nums',
+            queue.jobCounts.prioritized > 0
+              ? 'text-status-priority font-medium'
+              : 'text-muted-foreground'
+          )}
+        >
+          {queue.jobCounts.prioritized > 0 && <Rocket className="h-3.5 w-3.5" />}
+          {formatNumber(queue.jobCounts.prioritized)}
+        </span>
       </TableCell>
 
       {/* Active */}
       <TableCell className="text-right">
         <span
           className={cn(
-            'tabular-nums',
-            queue.jobCounts.active > 0
-              ? 'text-blue-600 dark:text-blue-400 font-medium'
-              : 'text-muted-foreground'
+            'font-mono text-[13px] tabular-nums',
+            queue.jobCounts.active > 0 ? 'text-status-active font-medium' : 'text-muted-foreground'
           )}
         >
           {formatNumber(queue.jobCounts.active)}
@@ -281,10 +585,8 @@ const QueueTableRow = memo(function QueueTableRow({ queue }: QueueTableRowProps)
       <TableCell className="text-right">
         <span
           className={cn(
-            'tabular-nums',
-            queue.jobCounts.delayed > 0
-              ? 'text-orange-600 dark:text-orange-400'
-              : 'text-muted-foreground'
+            'font-mono text-[13px] tabular-nums',
+            queue.jobCounts.delayed > 0 ? 'text-status-delayed' : 'text-muted-foreground'
           )}
         >
           {formatNumber(queue.jobCounts.delayed)}
@@ -295,10 +597,8 @@ const QueueTableRow = memo(function QueueTableRow({ queue }: QueueTableRowProps)
       <TableCell className="text-right">
         <span
           className={cn(
-            'tabular-nums',
-            queue.jobCounts.completed > 0
-              ? 'text-green-600 dark:text-green-400'
-              : 'text-muted-foreground'
+            'font-mono text-[13px] tabular-nums',
+            queue.jobCounts.completed > 0 ? 'text-status-success' : 'text-muted-foreground'
           )}
         >
           {formatNumber(queue.jobCounts.completed)}
@@ -309,10 +609,8 @@ const QueueTableRow = memo(function QueueTableRow({ queue }: QueueTableRowProps)
       <TableCell className="text-right">
         <span
           className={cn(
-            'inline-flex items-center gap-1.5 tabular-nums',
-            queue.jobCounts.failed > 0
-              ? 'text-red-600 dark:text-red-400 font-medium'
-              : 'text-muted-foreground'
+            'inline-flex items-center gap-1.5 font-mono text-[13px] tabular-nums',
+            queue.jobCounts.failed > 0 ? 'text-status-danger font-medium' : 'text-muted-foreground'
           )}
         >
           {queue.jobCounts.failed > 0 && <AlertCircle className="h-3.5 w-3.5" />}
@@ -348,7 +646,7 @@ const QueueTableRow = memo(function QueueTableRow({ queue }: QueueTableRowProps)
             <DropdownMenuItem
               onClick={handleTogglePause}
               disabled={isToggling}
-              className={queue.isPaused ? 'text-green-600' : 'text-amber-600'}
+              className={queue.isPaused ? 'text-status-success' : 'text-status-warning'}
             >
               {queue.isPaused ? (
                 <>
@@ -388,7 +686,7 @@ export function QueueMetricsBar({ queue }: { queue: QueueSummary }) {
         <Tooltip>
           <TooltipTrigger asChild>
             <div
-              className="bg-green-500 transition-all duration-500"
+              className="bg-status-success transition-all duration-500"
               style={{ width: getWidth(queue.jobCounts.completed) }}
             />
           </TooltipTrigger>
@@ -397,7 +695,7 @@ export function QueueMetricsBar({ queue }: { queue: QueueSummary }) {
         <Tooltip>
           <TooltipTrigger asChild>
             <div
-              className="bg-blue-500 transition-all duration-500"
+              className="bg-status-active transition-all duration-500"
               style={{ width: getWidth(queue.jobCounts.active) }}
             />
           </TooltipTrigger>
@@ -406,7 +704,7 @@ export function QueueMetricsBar({ queue }: { queue: QueueSummary }) {
         <Tooltip>
           <TooltipTrigger asChild>
             <div
-              className="bg-slate-400 transition-all duration-500"
+              className="bg-status-neutral transition-all duration-500"
               style={{ width: getWidth(queue.jobCounts.waiting) }}
             />
           </TooltipTrigger>
@@ -415,7 +713,7 @@ export function QueueMetricsBar({ queue }: { queue: QueueSummary }) {
         <Tooltip>
           <TooltipTrigger asChild>
             <div
-              className="bg-orange-500 transition-all duration-500"
+              className="bg-status-delayed transition-all duration-500"
               style={{ width: getWidth(queue.jobCounts.delayed) }}
             />
           </TooltipTrigger>
@@ -424,7 +722,7 @@ export function QueueMetricsBar({ queue }: { queue: QueueSummary }) {
         <Tooltip>
           <TooltipTrigger asChild>
             <div
-              className="bg-red-500 transition-all duration-500"
+              className="bg-status-danger transition-all duration-500"
               style={{ width: getWidth(queue.jobCounts.failed) }}
             />
           </TooltipTrigger>

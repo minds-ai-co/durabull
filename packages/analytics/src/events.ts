@@ -56,6 +56,9 @@ export const AnalyticsEvents = {
   QUEUE_VIEWED: 'queue_viewed',
   QUEUE_LIST_VIEWED: 'queue_list_viewed',
   QUEUE_EMPTY_TOGGLE: 'queue_empty_toggle',
+  QUEUE_LIST_SORTED: 'queue_list_sorted',
+  QUEUE_LIST_FILTERED: 'queue_list_filtered',
+  QUEUE_LIST_DEFAULT_VIEW_SAVED: 'queue_list_default_view_saved',
 
   // Job Events
   JOB_VIEWED: 'job_viewed',
@@ -108,6 +111,16 @@ export const AnalyticsEvents = {
 
   // App Lifecycle Events
   APP_UPDATE_CLICKED: 'app_update_clicked',
+
+  // MCP Events
+  MCP_RPC_REQUESTED: 'mcp_rpc_requested',
+  MCP_TOOL_CALLED: 'mcp_tool_called',
+  MCP_TOOL_DENIED: 'mcp_tool_denied',
+  MCP_AUTH_FAILED: 'mcp_auth_failed',
+  MCP_RATE_LIMITED: 'mcp_rate_limited',
+  MCP_CLIENT_REGISTERED: 'mcp_client_registered',
+  MCP_CONSENT_GRANTED: 'mcp_consent_granted',
+  MCP_CONSENT_DENIED: 'mcp_consent_denied',
 } as const
 
 /**
@@ -193,6 +206,16 @@ export const AnalyticsProperties = {
   TAB: 'tab',
   UPDATE_REASON: 'update_reason',
   VISIBLE: 'visible',
+
+  // MCP properties (sanitized — no raw IDs or connection names)
+  MCP_METHOD: 'mcp_method',
+  TOOL_NAME: 'tool_name',
+  PRINCIPAL_TYPE: 'principal_type',
+  RESPONSE_CLASS: 'response_class',
+  DENIAL_REASON_CATEGORY: 'denial_reason_category',
+  MCP_AUTH_FAILURE: 'mcp_auth_failure',
+  MCP_RATE_LIMIT_SCOPE: 'mcp_rate_limit_scope',
+  REDACTION_COUNT: 'redaction_count',
 } as const
 
 /**
@@ -222,6 +245,7 @@ export const DialogType = {
   UNLINK_ACCOUNT: 'unlink_account',
   DELETE_REDIS_KEY: 'delete_redis_key',
   INVOKE_JOB: 'invoke_job',
+  RETRY_JOB: 'retry_job',
   DUPLICATE_JOB: 'duplicate_job',
   ADD_JOB: 'add_job',
   ADD_SCHEDULED_JOB: 'add_scheduled_job',

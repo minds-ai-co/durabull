@@ -7,11 +7,15 @@ import {
   alertDeliveryRepository,
   alertEventRepository,
   alertRuleRepository,
+  alertWebhookDestination,
+  alertWebhookDestinationRepository,
   closeDb,
+  eq,
   getDb,
   organization,
   redisConnection,
   redisDiscoveredQueue,
+  user,
 } from '@durabull/dal'
 import { env } from '@durabull/env'
 import { Hono } from 'hono'
@@ -66,7 +70,19 @@ async function seedDiscoveredQueue(name: string) {
   })
 }
 
-async function createAlertsRouteApp() {
+async function seedUser(id: string, name: string) {
+  const db = await getDb()
+  const now = new Date()
+  await db.insert(user).values({
+    id,
+    name,
+    email: `${id}@example.com`,
+    createdAt: now,
+    updatedAt: now,
+  })
+}
+
+async function createAlertsRouteApp(options: { userId?: string; userName?: string } = {}) {
   const { default: alertsRoutes } = await import('./alerts')
 
   return new Hono()
@@ -75,6 +91,12 @@ async function createAlertsRouteApp() {
       c.set('connectionUrl', 'redis://localhost:6379/0')
       c.set('connectionName', 'Primary Redis')
       c.set('organizationId', TEST_ORG_ID)
+      c.set(
+        'user',
+        options.userId
+          ? ({ id: options.userId, name: options.userName ?? 'Test User' } as never)
+          : null
+      )
       await next()
     })
     .route('/', alertsRoutes)
@@ -158,6 +180,198 @@ describe('alerts routes', () => {
     expect(response.status).toBe(400)
     expect(await response.json()).toEqual({
       error: 'Only one Linear notification channel is supported per rule.',
+    })
+  })
+
+  it('rejects saved webhook destinations that do not exist', async () => {
+    const app = await createAlertsRouteApp()
+
+    const response = await app.request(
+      '/rules',
+      jsonRequest({
+        name: 'Missing webhook destination',
+        type: 'failure_threshold',
+        queueName: 'email-send',
+        config: { count: 5, windowMinutes: 5 },
+        notificationChannels: [
+          { type: 'webhook', destinationId: '11111111-1111-4111-8111-111111111111' },
+        ],
+        cooldownMinutes: 30,
+        enabled: true,
+      })
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: 'Webhook destination not found.' })
+  })
+
+  it('rejects disabled saved webhook destinations', async () => {
+    const app = await createAlertsRouteApp()
+    const destination = await alertWebhookDestinationRepository.create({
+      organizationId: TEST_ORG_ID,
+      name: 'Incident intake',
+      url: 'https://example.com/durabull',
+      enabled: false,
+    })
+
+    const response = await app.request(
+      '/rules',
+      jsonRequest({
+        name: 'Disabled webhook destination',
+        type: 'failure_threshold',
+        queueName: 'email-send',
+        config: { count: 5, windowMinutes: 5 },
+        notificationChannels: [{ type: 'webhook', destinationId: destination.id }],
+        cooldownMinutes: 30,
+        enabled: true,
+      })
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: 'Destination "Incident intake" is disabled.',
+    })
+  })
+
+  it('creates rules with valid saved webhook destinations', async () => {
+    const app = await createAlertsRouteApp()
+    const destination = await alertWebhookDestinationRepository.create({
+      organizationId: TEST_ORG_ID,
+      name: 'Incident intake',
+      url: 'https://example.com/durabull',
+    })
+
+    const response = await app.request(
+      '/rules',
+      jsonRequest({
+        name: 'Saved webhook destination',
+        type: 'failure_threshold',
+        queueName: 'email-send',
+        config: { count: 5, windowMinutes: 5 },
+        notificationChannels: [{ type: 'webhook', destinationId: destination.id }],
+        cooldownMinutes: 30,
+        enabled: true,
+      })
+    )
+
+    expect(response.status).toBe(201)
+    expect(await response.json()).toMatchObject({
+      rule: {
+        notificationChannels: [{ type: 'webhook', destinationId: destination.id }],
+      },
+    })
+  })
+
+  it('rejects saved webhook destinations with unreadable signing secrets', async () => {
+    const app = await createAlertsRouteApp()
+    const destination = await alertWebhookDestinationRepository.create({
+      organizationId: TEST_ORG_ID,
+      name: 'Corrupt secret',
+      url: 'https://example.com/durabull',
+      signingSecret: 'super-secret-webhook-value',
+    })
+    const db = await getDb()
+    await db
+      .update(alertWebhookDestination)
+      .set({ encryptedSigningSecret: 'enc:v1:corrupt' })
+      .where(eq(alertWebhookDestination.id, destination.id))
+
+    const response = await app.request(
+      '/rules',
+      jsonRequest({
+        name: 'Corrupt saved webhook destination',
+        type: 'failure_threshold',
+        queueName: 'email-send',
+        config: { count: 5, windowMinutes: 5 },
+        notificationChannels: [{ type: 'webhook', destinationId: destination.id }],
+        cooldownMinutes: 30,
+        enabled: true,
+      })
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: 'Webhook destination "Corrupt secret" signing secret could not be decrypted.',
+    })
+  })
+
+  it('rejects webhook channels with both custom URL and saved destination fields', async () => {
+    const app = await createAlertsRouteApp()
+
+    const response = await app.request(
+      '/rules',
+      jsonRequest({
+        name: 'Ambiguous webhook channel',
+        type: 'failure_threshold',
+        queueName: 'email-send',
+        config: { count: 5, windowMinutes: 5 },
+        notificationChannels: [
+          {
+            type: 'webhook',
+            url: 'https://example.com/durabull',
+            destinationId: '11111111-1111-4111-8111-111111111111',
+          },
+        ],
+        cooldownMinutes: 30,
+        enabled: true,
+      })
+    )
+
+    expect(response.status).toBe(400)
+  })
+
+  it('rejects duplicate custom webhook URLs on one rule', async () => {
+    const app = await createAlertsRouteApp()
+
+    const response = await app.request(
+      '/rules',
+      jsonRequest({
+        name: 'Duplicate custom webhooks',
+        type: 'failure_threshold',
+        queueName: 'email-send',
+        config: { count: 5, windowMinutes: 5 },
+        notificationChannels: [
+          { type: 'webhook', url: 'https://example.com/durabull' },
+          { type: 'webhook', url: 'https://example.com/durabull' },
+        ],
+        cooldownMinutes: 30,
+        enabled: true,
+      })
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: 'Duplicate custom webhook URLs are not allowed on the same alert rule.',
+    })
+  })
+
+  it('rejects duplicate saved webhook destinations on one rule', async () => {
+    const app = await createAlertsRouteApp()
+    const destination = await alertWebhookDestinationRepository.create({
+      organizationId: TEST_ORG_ID,
+      name: 'Incident intake',
+      url: 'https://example.com/durabull',
+    })
+
+    const response = await app.request(
+      '/rules',
+      jsonRequest({
+        name: 'Duplicate saved webhooks',
+        type: 'failure_threshold',
+        queueName: 'email-send',
+        config: { count: 5, windowMinutes: 5 },
+        notificationChannels: [
+          { type: 'webhook', destinationId: destination.id },
+          { type: 'webhook', destinationId: destination.id },
+        ],
+        cooldownMinutes: 30,
+        enabled: true,
+      })
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: 'Each destination can only be routed once per alert rule.',
     })
   })
 
@@ -371,6 +585,173 @@ describe('alerts routes', () => {
     })
   })
 
+  it('retries a failed delivery and re-attempts it through the API', async () => {
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Retryable incident',
+      type: 'job_failed',
+      config: { maxIssuesPerPoll: 10 },
+      notificationChannels: [{ type: 'linear', target: 'org-default', teamId: 'INTAKE' }],
+      cooldownMinutes: 30,
+    })
+
+    const event = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Linear delivery failed',
+      context: { jobId: 'job-1' },
+      firedAt: new Date(),
+    })
+
+    await alertDeliveryRepository.enqueueMany([
+      {
+        alertEventId: event.id,
+        organizationId: TEST_ORG_ID,
+        channelType: 'linear',
+        target: 'org-default:INTAKE',
+        providerMetadata: { type: 'linear', target: 'org-default', teamId: 'INTAKE' },
+      },
+    ])
+
+    const [claimed] = await alertDeliveryRepository.claimDueForEvent(event.id)
+    expect(claimed).toBeDefined()
+    await alertDeliveryRepository.markFailed(claimed.id, {
+      error: 'Linear integration is not configured for this organization.',
+      retryable: false,
+      expectedClaimedAt: claimed.claimedAt as Date,
+    })
+
+    const app = await createAlertsRouteApp()
+    const response = await app.request(`/events/${event.id}/deliveries/${claimed.id}/retry`, {
+      method: 'POST',
+    })
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      event: { deliveries: Array<{ id: string; status: string; attemptCount: number }> }
+    }
+    const delivery = body.event.deliveries.find((entry) => entry.id === claimed.id)
+    expect(delivery?.status).toBe('failed')
+    expect(delivery?.attemptCount).toBe(2)
+  })
+
+  it('retries only the targeted delivery when other deliveries are also due', async () => {
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Multi-channel incident',
+      type: 'job_failed',
+      config: { maxIssuesPerPoll: 10 },
+      notificationChannels: [
+        { type: 'email', target: 'ops@example.com' },
+        { type: 'linear', target: 'org-default', teamId: 'INTAKE' },
+      ],
+      cooldownMinutes: 30,
+    })
+
+    const event = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'One channel failed',
+      context: { jobId: 'job-1' },
+      firedAt: new Date(),
+    })
+
+    const [emailDelivery, linearDelivery] = await alertDeliveryRepository.enqueueMany([
+      {
+        alertEventId: event.id,
+        organizationId: TEST_ORG_ID,
+        channelType: 'email',
+        target: 'ops@example.com',
+      },
+      {
+        alertEventId: event.id,
+        organizationId: TEST_ORG_ID,
+        channelType: 'linear',
+        target: 'org-default:INTAKE',
+        providerMetadata: { type: 'linear', target: 'org-default', teamId: 'INTAKE' },
+      },
+    ])
+
+    const [claimedLinear] = await alertDeliveryRepository.claimById(linearDelivery!.id, event.id)
+    await alertDeliveryRepository.markFailed(claimedLinear!.id, {
+      error: 'Linear integration is not configured for this organization.',
+      retryable: false,
+      expectedClaimedAt: claimedLinear!.claimedAt as Date,
+    })
+
+    const app = await createAlertsRouteApp()
+    const response = await app.request(
+      `/events/${event.id}/deliveries/${linearDelivery!.id}/retry`,
+      { method: 'POST' }
+    )
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      event: { deliveries: Array<{ id: string; status: string; attemptCount: number }> }
+    }
+    const retried = body.event.deliveries.find((entry) => entry.id === linearDelivery!.id)
+    const untouched = body.event.deliveries.find((entry) => entry.id === emailDelivery!.id)
+
+    expect(retried?.status).toBe('failed')
+    expect(retried?.attemptCount).toBe(2)
+    expect(untouched?.status).toBe('pending')
+    expect(untouched?.attemptCount).toBe(0)
+  })
+
+  it('returns 404 when retrying a delivery that is not in a retryable state', async () => {
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Pending delivery',
+      type: 'job_failed',
+      config: { maxIssuesPerPoll: 10 },
+      notificationChannels: [{ type: 'linear', target: 'org-default', teamId: 'INTAKE' }],
+      cooldownMinutes: 30,
+    })
+
+    const event = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Pending linear delivery',
+      context: {},
+      firedAt: new Date(),
+    })
+
+    const [pending] = await alertDeliveryRepository.enqueueMany([
+      {
+        alertEventId: event.id,
+        organizationId: TEST_ORG_ID,
+        channelType: 'linear',
+        target: 'org-default:INTAKE',
+        providerMetadata: { type: 'linear', target: 'org-default', teamId: 'INTAKE' },
+      },
+    ])
+
+    const app = await createAlertsRouteApp()
+    const response = await app.request(`/events/${event.id}/deliveries/${pending.id}/retry`, {
+      method: 'POST',
+    })
+
+    expect(response.status).toBe(404)
+  })
+
   it('rejects webhook URLs that target private networks', async () => {
     const app = await createAlertsRouteApp()
 
@@ -501,5 +882,401 @@ describe('alerts routes', () => {
       secretLast4: 'mnop',
     })
     expect(delivery?.providerMetadata?.secret).toBeUndefined()
+  })
+
+  it('snoozes and unsnoozes a rule without touching its open incidents', async () => {
+    const app = await createAlertsRouteApp()
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Failure threshold',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      cooldownMinutes: 30,
+    })
+    const event = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Open incident',
+      firedAt: new Date(),
+    })
+
+    const snoozeResponse = await app.request(
+      `/rules/${rule.id}/snooze`,
+      jsonRequest({ minutes: 60 })
+    )
+    expect(snoozeResponse.status).toBe(200)
+    const snoozed = (await snoozeResponse.json()) as {
+      rule: { state: string; mutedUntil: string | null }
+    }
+    expect(snoozed.rule.state).toBe('snoozed')
+    expect(new Date(snoozed.rule.mutedUntil ?? 0).getTime()).toBeGreaterThan(Date.now())
+
+    // Snooze must not resolve open incidents (unlike disabling the rule).
+    const stillFiring = await alertEventRepository.findById(event.id, TEST_ORG_ID)
+    expect(stillFiring?.status).toBe('firing')
+
+    const unsnoozeResponse = await app.request(`/rules/${rule.id}/snooze`, { method: 'DELETE' })
+    expect(unsnoozeResponse.status).toBe(200)
+    const unsnoozed = (await unsnoozeResponse.json()) as {
+      rule: { state: string; mutedUntil: string | null }
+    }
+    expect(unsnoozed.rule.state).toBe('active')
+    expect(unsnoozed.rule.mutedUntil).toBeNull()
+  })
+
+  it('validates snooze payloads and rule existence', async () => {
+    const app = await createAlertsRouteApp()
+
+    const missing = await app.request(
+      '/rules/66666666-6666-4666-8666-666666666666/snooze',
+      jsonRequest({ minutes: 60 })
+    )
+    expect(missing.status).toBe(404)
+
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Failure threshold',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      cooldownMinutes: 30,
+    })
+
+    const tooLong = await app.request(
+      `/rules/${rule.id}/snooze`,
+      jsonRequest({ minutes: 10081 })
+    )
+    expect(tooLong.status).toBe(400)
+  })
+
+  it('acknowledges firing events with the current user and rejects repeats', async () => {
+    await seedUser('user-ack', 'Ada Operator')
+    const app = await createAlertsRouteApp({ userId: 'user-ack', userName: 'Ada Operator' })
+
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Failure threshold',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      cooldownMinutes: 30,
+    })
+    const event = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Open incident',
+      firedAt: new Date(),
+    })
+
+    const response = await app.request(`/events/${event.id}/acknowledge`, { method: 'POST' })
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      event: { acknowledgedBy: string | null; acknowledgedByName: string | null }
+    }
+    expect(body.event.acknowledgedBy).toBe('user-ack')
+    expect(body.event.acknowledgedByName).toBe('Ada Operator')
+
+    const repeat = await app.request(`/events/${event.id}/acknowledge`, { method: 'POST' })
+    expect(repeat.status).toBe(409)
+
+    const unack = await app.request(`/events/${event.id}/acknowledge`, { method: 'DELETE' })
+    expect(unack.status).toBe(200)
+
+    const listResponse = await app.request('/events?acknowledged=false')
+    const list = (await listResponse.json()) as { events: Array<{ id: string }> }
+    expect(list.events.some((entry) => entry.id === event.id)).toBe(true)
+  })
+
+  it('requires an authenticated user to acknowledge', async () => {
+    const app = await createAlertsRouteApp()
+    const response = await app.request(
+      '/events/66666666-6666-4666-8666-666666666666/acknowledge',
+      { method: 'POST' }
+    )
+    expect(response.status).toBe(401)
+  })
+
+  it('refuses to resolve suppressed events', async () => {
+    await seedUser('user-res', 'Res Olver')
+    const app = await createAlertsRouteApp({ userId: 'user-res' })
+
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Failure threshold',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      cooldownMinutes: 30,
+    })
+    const anchor = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'resolved',
+      summary: 'Anchor incident',
+      firedAt: new Date(),
+    })
+    const { event: suppressed } = await alertEventRepository.upsertSuppressed({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      summary: 'Suppressed during cooldown',
+      context: {},
+      dedupeKey: `suppressed:${anchor.id}`,
+    })
+
+    const response = await app.request(`/events/${suppressed.id}/resolve`, { method: 'POST' })
+    expect(response.status).toBe(409)
+
+    // Acknowledging suppressed events is rejected too (not firing).
+    const ack = await app.request(`/events/${suppressed.id}/acknowledge`, { method: 'POST' })
+    expect(ack.status).toBe(409)
+  })
+
+  it('reports rule state in list responses', async () => {
+    const app = await createAlertsRouteApp()
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Failure threshold',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      cooldownMinutes: 30,
+    })
+    await alertRuleRepository.setMutedUntil(
+      rule.id,
+      TEST_ORG_ID,
+      new Date(Date.now() + 60 * 60_000)
+    )
+
+    const response = await app.request('/rules')
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      rules: Array<{ id: string; state: string; mutedUntil: string | null }>
+    }
+    expect(body.rules.find((entry) => entry.id === rule.id)?.state).toBe('snoozed')
+  })
+
+  it('scopes resolve/acknowledge/unacknowledge to the URL connection, not just the org', async () => {
+    await seedUser('user-scope', 'Scope Tester')
+    const app = await createAlertsRouteApp({ userId: 'user-scope' })
+
+    const otherConnectionId = '66666666-6666-4666-8666-666666666666'
+    const db = await getDb()
+    await db.insert(redisConnection).values({
+      id: otherConnectionId,
+      name: 'Other Redis',
+      url: 'redis://localhost:6379/1',
+      environment: 'development',
+      isDefault: false,
+      organizationId: TEST_ORG_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
+
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: otherConnectionId,
+      queueName: 'email-send',
+      name: 'Other connection rule',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      cooldownMinutes: 30,
+    })
+    const event = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: otherConnectionId,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Belongs to a different connection',
+      firedAt: new Date(),
+    })
+
+    // The route app is scoped to TEST_CONNECTION_ID; this event belongs to
+    // otherConnectionId and must not be actionable from here.
+    const ackResponse = await app.request(`/events/${event.id}/acknowledge`, { method: 'POST' })
+    expect(ackResponse.status).toBe(404)
+
+    const resolveResponse = await app.request(`/events/${event.id}/resolve`, { method: 'POST' })
+    expect(resolveResponse.status).toBe(404)
+
+    const unchanged = await alertEventRepository.findById(event.id, TEST_ORG_ID)
+    expect(unchanged?.status).toBe('firing')
+    expect(unchanged?.acknowledgedAt).toBeNull()
+
+    const unackResponse = await app.request(`/events/${event.id}/acknowledge`, {
+      method: 'DELETE',
+    })
+    expect(unackResponse.status).toBe(404)
+  })
+
+  it('bulk resolves firing events scoped to the connection', async () => {
+    const rule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Job failures',
+      type: 'job_failed',
+      config: {},
+      cooldownMinutes: 30,
+    })
+
+    const firingEvent = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'firing',
+      summary: 'Job job-1 failed in email-send',
+      context: { jobId: 'job-1' },
+      firedAt: new Date(),
+    })
+
+    const alreadyResolvedEvent = await alertEventRepository.create({
+      alertRuleId: rule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: rule.type,
+      status: 'resolved',
+      summary: 'Job job-2 failed in email-send',
+      context: { jobId: 'job-2' },
+      firedAt: new Date(),
+      resolvedAt: new Date(),
+    })
+
+    // Same org, different connection — the connection-scoped route must not touch it.
+    const db = await getDb()
+    const otherConnectionId = '66666666-6666-4666-8666-666666666666'
+    const now = new Date()
+    await db.insert(redisConnection).values({
+      id: otherConnectionId,
+      name: 'Secondary Redis',
+      url: 'redis://localhost:6380/0',
+      environment: 'development',
+      isDefault: false,
+      organizationId: TEST_ORG_ID,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const otherRule = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: otherConnectionId,
+      queueName: 'email-send',
+      name: 'Other job failures',
+      type: 'job_failed',
+      config: {},
+      cooldownMinutes: 30,
+    })
+    const otherConnectionEvent = await alertEventRepository.create({
+      alertRuleId: otherRule.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: otherConnectionId,
+      queueName: 'email-send',
+      type: otherRule.type,
+      status: 'firing',
+      summary: 'Job job-3 failed in email-send',
+      context: { jobId: 'job-3' },
+      firedAt: new Date(),
+    })
+
+    const app = await createAlertsRouteApp()
+    const response = await app.request(
+      '/events/resolve-bulk',
+      jsonRequest({
+        eventIds: [firingEvent.id, alreadyResolvedEvent.id, otherConnectionEvent.id],
+      })
+    )
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      resolvedCount: number
+      events: Array<{ id: string; status: string }>
+    }
+    expect(body.resolvedCount).toBe(1)
+    expect(body.events[0]?.id).toBe(firingEvent.id)
+    expect(body.events[0]?.status).toBe('resolved')
+
+    const untouched = await alertEventRepository.findById(otherConnectionEvent.id, TEST_ORG_ID)
+    expect(untouched?.status).toBe('firing')
+  })
+
+  it('rejects bulk resolve payloads without event ids', async () => {
+    const app = await createAlertsRouteApp()
+    const response = await app.request('/events/resolve-bulk', jsonRequest({ eventIds: [] }))
+    expect(response.status).toBe(400)
+  })
+
+  it('filters events by alertRuleId', async () => {
+    const ruleA = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Rule A',
+      type: 'job_failed',
+      config: {},
+      cooldownMinutes: 30,
+    })
+    const ruleB = await alertRuleRepository.create({
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      name: 'Rule B',
+      type: 'failure_threshold',
+      config: { count: 5, windowMinutes: 5 },
+      cooldownMinutes: 30,
+    })
+
+    const eventA = await alertEventRepository.create({
+      alertRuleId: ruleA.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: ruleA.type,
+      status: 'firing',
+      summary: 'Job job-1 failed in email-send',
+      context: { jobId: 'job-1' },
+      firedAt: new Date(),
+    })
+    await alertEventRepository.create({
+      alertRuleId: ruleB.id,
+      organizationId: TEST_ORG_ID,
+      connectionId: TEST_CONNECTION_ID,
+      queueName: 'email-send',
+      type: ruleB.type,
+      status: 'firing',
+      summary: 'Failure spike',
+      context: {},
+      firedAt: new Date(),
+    })
+
+    const app = await createAlertsRouteApp()
+    const response = await app.request(`/events?alertRuleId=${ruleA.id}`)
+    expect(response.status).toBe(200)
+
+    const body = (await response.json()) as { events: Array<{ id: string }> }
+    expect(body.events).toHaveLength(1)
+    expect(body.events[0]?.id).toBe(eventA.id)
   })
 })

@@ -39,7 +39,20 @@ Built-in controls include:
 - secure headers
 - CORS policy
 - request body size limit (`1MB`)
-- in-memory rate limiting in production
+- in-memory rate limiting when `NODE_ENV=production`
+- set `TRUST_PROXY=true` when the API sits behind a reverse proxy that sets forwarding headers; Durabull Cloud enables this automatically via `DURABULL_CLOUD`
+
+### MCP (`/mcp`)
+
+Durabull's hosted MCP endpoint adds layered read protections (enforced when `NODE_ENV=production`):
+
+- **Ingress rate limit:** 120 HTTP requests/minute per bearer token, or per trusted `cf-connecting-ip` / `x-real-ip` / `x-forwarded-for` when unauthenticated on all `/mcp` traffic (`TRUST_PROXY` / `DURABULL_CLOUD` required for forwarding headers)
+- **Per-tool rate limit:** 60 calls/minute per tool name by default; 30/minute for `get_job_logs`, `get_job_stacktraces`, `get_failure_events`, `get_queue_metrics`, `explain_job_failure`
+- **Output redaction:** central sanitizer removes Redis URLs, credential-like keys, and bearer tokens from tool payloads
+- **Audit events:** every MCP tool call records principal, tool, input hash, and outcome in `mcp_audit_event`
+- **Structured telemetry:** JSON `mcp_telemetry` logs for policy denies, rate limits, and tool outcomes (auth failures: use HTTP access logs until auth telemetry is wired)
+
+See [MCP Server](/documentation/integrations/mcp-server) for scopes, tools, and client setup. Operators: [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md).
 
 If running multiple API replicas, consider moving rate limits to a shared backend.
 

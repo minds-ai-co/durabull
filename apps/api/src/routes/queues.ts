@@ -9,13 +9,13 @@ import {
   DEFAULT_PRIORITY_BUCKETS,
   MAX_METRICS_WINDOW_MINUTES,
 } from '../lib/bullmq-metrics'
+import { getConnectionRedisOptions } from '../lib/connection-options'
+import { deleteQueueWithDiscoveryCleanup } from '../lib/delete-queue'
 import {
   getQueueDiscoveryStatus,
   startQueueDiscovery,
   waitForQueueDiscovery,
 } from '../lib/queue-discovery'
-import { deleteQueueWithDiscoveryCleanup } from '../lib/delete-queue'
-import { getConnectionRedisOptions } from '../lib/connection-options'
 import { debugGetBullKeys, getQueue, safeGetWorkers } from '../lib/redis'
 
 // Default and max page sizes for pagination
@@ -38,6 +38,54 @@ const PURGEABLE_QUEUE_STATUSES = [
 type PurgeableQueueStatus = (typeof PURGEABLE_QUEUE_STATUSES)[number]
 
 const PURGE_STATUS_OPTIONS = ['all', ...PURGEABLE_QUEUE_STATUSES] as const
+const QUEUE_SORT_FIELDS = [
+  'name',
+  'status',
+  'waiting',
+  'prioritized',
+  'active',
+  'delayed',
+  'completed',
+  'failed',
+] as const
+type QueueSortField = (typeof QUEUE_SORT_FIELDS)[number]
+
+const listQueuesQuerySchema = z.object({
+  page: z.string().optional(),
+  pageSize: z.string().optional(),
+  sortBy: z.enum(QUEUE_SORT_FIELDS).optional(),
+  sortOrder: z.enum(['asc', 'desc']).optional(),
+  search: z.string().optional(),
+  status: z.enum(['active', 'paused']).optional(),
+})
+
+interface QueueListEntry {
+  name: string
+  status: 'active' | 'paused'
+  jobCounts: {
+    waiting: number
+    active: number
+    delayed: number
+    completed: number
+    failed: number
+    paused: number
+    prioritized: number
+  }
+  isPaused: boolean
+  discoveryState: 'pending' | 'confirmed'
+}
+
+function compareQueueEntries(a: QueueListEntry, b: QueueListEntry, sortBy: QueueSortField): number {
+  switch (sortBy) {
+    case 'name':
+      return a.name.localeCompare(b.name)
+    case 'status':
+      return a.status.localeCompare(b.status)
+    default:
+      return a.jobCounts[sortBy] - b.jobCounts[sortBy]
+  }
+}
+
 const queueMetricsQuerySchema = z.object({
   windowMinutes: z.string().optional(),
   start: z.string().optional(),
@@ -244,56 +292,67 @@ const app = new Hono()
 
     return c.json(status, 202)
   })
-  // List all queues (paginated)
-  .get('/', async (c) => {
+  // List all queues (paginated, sortable, filterable)
+  .get('/', zValidator('query', listQueuesQuerySchema), async (c) => {
     const connectionId = c.get('connectionId')
     const connectionUrl = c.get('connectionUrl')
     const connectionPrefix = c.get('connectionPrefix')
     const redisOptions = getConnectionRedisOptions(c)
-    const pageStr = c.req.query('page')
-    const pageSizeStr = c.req.query('pageSize')
-
-    const page = pageStr ? parseInt(pageStr, 10) : 1
-    const pageSize = Math.min(
-      pageSizeStr ? parseInt(pageSizeStr, 10) : DEFAULT_PAGE_SIZE,
-      MAX_PAGE_SIZE
-    )
-
-    // Paginate the queue names BEFORE fetching details
-    const start = (page - 1) * pageSize
-    const end = start + pageSize
+    const query = c.req.valid('query')
+    const page = Math.max(1, parseInteger(query.page) ?? 1)
+    const pageSize = Math.min(parseInteger(query.pageSize) ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE)
+    const sortBy: QueueSortField = query.sortBy ?? 'name'
+    const sortOrder = query.sortOrder ?? 'asc'
+    const search = query.search?.trim().toLowerCase() ?? ''
+    const statusFilter = query.status
 
     let discovery = await getQueueDiscoveryStatus(connectionId)
-    let total = discovery.indexed.total
+    let indexedTotal = discovery.indexed.total
     const hasDiscoveryAttempt =
       discovery.running ||
       discovery.startedAt !== null ||
       discovery.completedAt !== null ||
       discovery.lastError !== null
 
-    if (total === 0 && !hasDiscoveryAttempt) {
+    if (indexedTotal === 0 && !hasDiscoveryAttempt) {
       await startQueueDiscovery(connectionId, connectionUrl, {
         prefix: connectionPrefix,
         allowSelfSignedCerts: redisOptions.allowSelfSignedCerts,
       })
       discovery = await getQueueDiscoveryStatus(connectionId)
-      total = discovery.indexed.total
+      indexedTotal = discovery.indexed.total
     }
 
+    // Sorting and filtering must happen BEFORE pagination, so fetch live
+    // counts for every indexed queue (also required to aggregate totals).
     const indexedQueues = await redisDiscoveredQueueRepository.listByConnection(connectionId, {
-      offset: start,
-      limit: pageSize,
+      offset: 0,
+      limit: Math.max(indexedTotal, pageSize),
     })
 
-    const queuesData = await Promise.all(
+    const totalJobCounts = {
+      waiting: 0,
+      active: 0,
+      delayed: 0,
+      completed: 0,
+      failed: 0,
+      prioritized: 0,
+    }
+
+    const allQueues: QueueListEntry[] = await Promise.all(
       indexedQueues.map(async (indexedQueue) => {
-        const queue = await getQueue(connectionId, connectionUrl, indexedQueue.name, connectionPrefix, redisOptions)
+        const queue = await getQueue(
+          connectionId,
+          connectionUrl,
+          indexedQueue.name,
+          connectionPrefix,
+          redisOptions
+        )
         const [counts, isPaused] = await Promise.all([queue.getJobCounts(), queue.isPaused()])
 
-        const status: 'paused' | 'active' = isPaused ? 'paused' : 'active'
         return {
           name: indexedQueue.name,
-          status,
+          status: isPaused ? ('paused' as const) : ('active' as const),
           jobCounts: {
             waiting: counts.waiting ?? 0,
             active: counts.active ?? 0,
@@ -309,13 +368,43 @@ const app = new Hono()
       })
     )
 
+    // Connection-wide totals always reflect ALL queues, independent of filters
+    for (const queue of allQueues) {
+      totalJobCounts.waiting += queue.jobCounts.waiting
+      totalJobCounts.active += queue.jobCounts.active
+      totalJobCounts.delayed += queue.jobCounts.delayed
+      totalJobCounts.completed += queue.jobCounts.completed
+      totalJobCounts.failed += queue.jobCounts.failed
+      totalJobCounts.prioritized += queue.jobCounts.prioritized
+    }
+
+    const filteredQueues = allQueues.filter((queue) => {
+      if (search && !queue.name.toLowerCase().includes(search)) return false
+      if (statusFilter && queue.status !== statusFilter) return false
+      return true
+    })
+
+    const direction = sortOrder === 'desc' ? -1 : 1
+    filteredQueues.sort((a, b) => {
+      const diff = compareQueueEntries(a, b, sortBy)
+      if (diff !== 0) return direction * diff
+      // Stable, predictable tiebreaker regardless of sort direction
+      return a.name.localeCompare(b.name)
+    })
+
+    const total = filteredQueues.length
+    const start = (page - 1) * pageSize
+    const end = start + pageSize
+
     return c.json({
-      queues: queuesData,
+      queues: filteredQueues.slice(start, end),
       total,
+      totalUnfiltered: Math.max(indexedTotal, allQueues.length),
       page,
       pageSize,
-      totalPages: Math.ceil(total / pageSize),
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
       hasMore: end < total,
+      totalJobCounts,
       discovery,
     })
   })
@@ -326,7 +415,13 @@ const app = new Hono()
     const connectionPrefix = c.get('connectionPrefix')
     const redisOptions = getConnectionRedisOptions(c)
     const queueName = c.req.param('queueName')
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     const [counts, isPaused, workers, schedulers] = await Promise.all([
       queue.getJobCounts(),
       queue.isPaused(),
@@ -400,7 +495,13 @@ const app = new Hono()
     const includePrometheus = parseBoolean(query.includePrometheus)
     const priorities = parsePriorities(query.priorities)
 
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     const metrics = await collectQueueNativeMetrics(queue, {
       queueName,
       start,
@@ -419,7 +520,13 @@ const app = new Hono()
     const connectionPrefix = c.get('connectionPrefix')
     const redisOptions = getConnectionRedisOptions(c)
     const queueName = c.req.param('queueName')
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     await queue.pause()
     return c.json({ success: true })
   })
@@ -430,7 +537,13 @@ const app = new Hono()
     const connectionPrefix = c.get('connectionPrefix')
     const redisOptions = getConnectionRedisOptions(c)
     const queueName = c.req.param('queueName')
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     await queue.resume()
     return c.json({ success: true })
   })
@@ -449,10 +562,16 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const { status, gracePeriod = 0, limit = 1000 } = c.req.valid('json')
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
 
       const cleanStatus = cleanStatusMap[status as PurgeableQueueStatus]
       if (!cleanStatus) {
@@ -482,7 +601,7 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const { confirmName, statuses, keepMostRecent } = c.req.valid('json')
 
@@ -505,7 +624,13 @@ const app = new Hono()
         return c.json({ error: 'At least one status must be selected for purge' }, 400)
       }
 
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
       const removedByStatus = Object.fromEntries(
         statusesToPurge.map((status) => [status, 0])
       ) as Record<PurgeableQueueStatus, number>
@@ -715,7 +840,13 @@ const app = new Hono()
     const connectionPrefix = c.get('connectionPrefix')
     const redisOptions = getConnectionRedisOptions(c)
     const queueName = c.req.param('queueName')
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     await deleteQueueWithDiscoveryCleanup(connectionId, queueName, queue)
     return c.json({ success: true })
   })
@@ -732,7 +863,7 @@ const app = new Hono()
       const connectionId = c.get('connectionId')
       const connectionUrl = c.get('connectionUrl')
       const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
+      const redisOptions = getConnectionRedisOptions(c)
       const queueName = c.req.param('queueName')
       const { confirmName } = c.req.valid('json')
 
@@ -741,7 +872,13 @@ const app = new Hono()
         return c.json({ error: 'Queue name confirmation does not match', canDelete: false }, 400)
       }
 
-      const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
       const counts = await queue.getJobCounts()
 
       // Calculate total jobs (excluding completed as they can be cleaned)
@@ -782,7 +919,13 @@ const app = new Hono()
     const connectionPrefix = c.get('connectionPrefix')
     const redisOptions = getConnectionRedisOptions(c)
     const queueName = c.req.param('queueName')
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
+    const queue = await getQueue(
+      connectionId,
+      connectionUrl,
+      queueName,
+      connectionPrefix,
+      redisOptions
+    )
     const counts = await queue.getJobCounts()
 
     const totalActiveJobs =

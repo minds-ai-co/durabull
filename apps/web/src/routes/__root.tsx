@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import { configureDurabullTelemetry } from '@durabull/analytics'
+import { configureDurabullTelemetry } from '@durabull/analytics/browser'
 import type { QueryClient } from '@tanstack/react-query'
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
 import {
@@ -18,10 +18,9 @@ import {
   Calendar,
   Database,
   Layers,
-  Link2,
   Loader2,
   Network,
-  Users,
+  Settings,
 } from 'lucide-react'
 import { PostHogProvider } from 'posthog-js/react'
 import { useEffect, useMemo, useState } from 'react'
@@ -45,8 +44,11 @@ import { useAuth } from '@/hooks/use-auth'
 import { useIsElectronShell } from '@/hooks/use-electron-shell'
 import { type Organization, useOrganizations } from '@/hooks/use-organization'
 import { usePageViewTracking } from '@/hooks/use-page-view-tracking'
+import { type UseQueuesOptions, useQueues } from '@/hooks/use-queues'
 import { APP_BUILD_INFO } from '@/lib/app-version'
-import { cn } from '@/lib/utils'
+import { isNavLinkActive } from '@/lib/nav-link-active'
+import { SESSION_KEYS, type SessionWithActiveOrganization } from '@/lib/session-keys'
+import { cn, formatCompactNumber } from '@/lib/utils'
 
 /**
  * Hook to get the current organization slug.
@@ -63,7 +65,9 @@ function useCurrentOrgSlug(): string | undefined {
   if (paramsOrgSlug) return paramsOrgSlug
 
   // Fall back to active organization from session
-  const activeOrgId = (session as { activeOrganizationId?: string })?.activeOrganizationId
+  const activeOrgId = (session as SessionWithActiveOrganization)?.[
+    SESSION_KEYS.ACTIVE_ORGANIZATION_ID
+  ]
   if (activeOrgId && organizations) {
     const activeOrg = organizations.find((org: Organization) => org.id === activeOrgId)
     if (activeOrg) return activeOrg.slug
@@ -73,10 +77,11 @@ function useCurrentOrgSlug(): string | undefined {
 }
 
 const USE_DEVTOOLS = false
+const NAV_QUEUE_COUNT_OPTIONS: UseQueuesOptions = { pageSize: 1 }
 
 // Public routes that don't require authentication (auth-related only)
 // Marketing/landing pages are now in the separate docs app
-const PUBLIC_ROUTES = ['/login', '/signup', '/auth-error']
+const PUBLIC_ROUTES = ['/login', '/signup', '/auth-error', '/consent']
 
 // Check if a path matches an invite route pattern
 const isInviteRoute = (pathname: string) => pathname.startsWith('/invite/')
@@ -191,6 +196,8 @@ function RootLayout() {
   const location = useLocation()
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const isElectronShell = useIsElectronShell()
+  const orgSlug = useCurrentOrgSlug()
+  const settingsPath = orgSlug ? `/${orgSlug}/settings/connections` : '/settings'
 
   usePageViewTracking()
 
@@ -281,9 +288,7 @@ function RootLayout() {
 
             {/* Connection Selector */}
             <div className="shrink-0 border-b p-3">
-              <div className="mb-2 px-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Connection
-              </div>
+              <div className="eyebrow mb-2 px-2">Connection</div>
               <ConnectionSelector />
             </div>
 
@@ -292,7 +297,7 @@ function RootLayout() {
 
             {/* User menu at bottom */}
             <div className="shrink-0 border-t p-3">
-              <NavUser user={displayUser} />
+              <NavUser user={displayUser} settingsPath={settingsPath} />
             </div>
           </aside>
 
@@ -352,9 +357,7 @@ function RootLayout() {
 
               {/* Connection Selector */}
               <div className="shrink-0 border-b p-3">
-                <div className="mb-2 px-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Connection
-                </div>
+                <div className="eyebrow mb-2 px-2">Connection</div>
                 <ConnectionSelector />
               </div>
 
@@ -363,7 +366,7 @@ function RootLayout() {
 
               {/* User menu at bottom */}
               <div className="shrink-0 border-t p-3 bg-sidebar-background">
-                <NavUser user={displayUser} />
+                <NavUser user={displayUser} settingsPath={settingsPath} />
               </div>
             </SheetContent>
           </Sheet>
@@ -374,9 +377,9 @@ function RootLayout() {
 }
 
 function SidebarNav() {
-  const { isAuthless } = useAppMode()
   const { currentConnection } = useConnection()
   const { data: alertSummary } = useAlertSummary()
+  const { data: queuesData } = useQueues(NAV_QUEUE_COUNT_OPTIONS)
   const params = useParams({ strict: false }) as { connectionId?: string }
   const connectionId = currentConnection?.id
   // Get orgSlug from route params or fall back to active organization
@@ -385,6 +388,7 @@ function SidebarNav() {
     () => getOpenAlertCount(alertSummary?.connections, params.connectionId),
     [alertSummary?.connections, params.connectionId]
   )
+  const failedJobsBadgeLabel = formatFailedJobsBadgeLabel(queuesData?.totalJobCounts.failed)
 
   // If no connection or org is selected, we can still show nav but links won't work
   // The index page will handle redirecting to a connection
@@ -393,10 +397,13 @@ function SidebarNav() {
 
   return (
     <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-3">
-      <div className="mb-2 px-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-        Platform
-      </div>
-      <NavLink to={basePath} icon={Layers}>
+      <div className="eyebrow mb-2 px-2">Platform</div>
+      <NavLink
+        to={basePath}
+        matchPath={`${basePath}/queues`}
+        icon={Layers}
+        badgeLabel={failedJobsBadgeLabel}
+      >
         Queues
       </NavLink>
       <NavLink to={`${basePath}/alerts`} icon={BellRing} badge={openAlertsBadgeCount}>
@@ -414,26 +421,17 @@ function SidebarNav() {
       <NavLink to={`${basePath}/redis-keys`} icon={Database}>
         KV Explorer
       </NavLink>
-
-      <div className="mb-2 mt-4 px-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+      <NavLink to={orgSlug ? `/${orgSlug}/settings` : '/settings'} icon={Settings}>
         Settings
-      </div>
-      <NavLink to={orgSlug ? `/${orgSlug}/connections` : '/connections'} icon={Link2}>
-        Connections
       </NavLink>
-      {!isAuthless && (
-        <NavLink to={orgSlug ? `/${orgSlug}/team` : '/team'} icon={Users}>
-          Team
-        </NavLink>
-      )}
     </nav>
   )
 }
 
 function MobileSidebarNav({ onNavigate }: { onNavigate: () => void }) {
-  const { isAuthless } = useAppMode()
   const { currentConnection } = useConnection()
   const { data: alertSummary } = useAlertSummary()
+  const { data: queuesData } = useQueues(NAV_QUEUE_COUNT_OPTIONS)
   const params = useParams({ strict: false }) as { connectionId?: string }
   const connectionId = currentConnection?.id
   // Get orgSlug from route params or fall back to active organization
@@ -442,16 +440,21 @@ function MobileSidebarNav({ onNavigate }: { onNavigate: () => void }) {
     () => getOpenAlertCount(alertSummary?.connections, params.connectionId),
     [alertSummary?.connections, params.connectionId]
   )
+  const failedJobsBadgeLabel = formatFailedJobsBadgeLabel(queuesData?.totalJobCounts.failed)
 
   const basePath =
     orgSlug && connectionId ? `/${orgSlug}/c/${connectionId}` : orgSlug ? `/${orgSlug}` : '/'
 
   return (
     <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-3">
-      <div className="mb-2 px-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-        Platform
-      </div>
-      <MobileNavLink to={basePath} icon={Layers} onNavigate={onNavigate}>
+      <div className="eyebrow mb-2 px-2">Platform</div>
+      <MobileNavLink
+        to={basePath}
+        matchPath={`${basePath}/queues`}
+        icon={Layers}
+        onNavigate={onNavigate}
+        badgeLabel={failedJobsBadgeLabel}
+      >
         Queues
       </MobileNavLink>
       <MobileNavLink
@@ -474,26 +477,13 @@ function MobileSidebarNav({ onNavigate }: { onNavigate: () => void }) {
       <MobileNavLink to={`${basePath}/redis-keys`} icon={Database} onNavigate={onNavigate}>
         KV Explorer
       </MobileNavLink>
-
-      <div className="mb-2 mt-4 px-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-        Settings
-      </div>
       <MobileNavLink
-        to={orgSlug ? `/${orgSlug}/connections` : '/connections'}
-        icon={Link2}
+        to={orgSlug ? `/${orgSlug}/settings` : '/settings'}
+        icon={Settings}
         onNavigate={onNavigate}
       >
-        Connections
+        Settings
       </MobileNavLink>
-      {!isAuthless && (
-        <MobileNavLink
-          to={orgSlug ? `/${orgSlug}/team` : '/team'}
-          icon={Users}
-          onNavigate={onNavigate}
-        >
-          Team
-        </MobileNavLink>
-      )}
     </nav>
   )
 }
@@ -504,34 +494,40 @@ function MobileNavLink({
   children,
   onNavigate,
   badge,
+  badgeLabel,
+  matchPath,
 }: {
   to: string
   icon: React.ComponentType<{ className?: string }>
   children: React.ReactNode
   onNavigate: () => void
   badge?: number
+  badgeLabel?: string
+  matchPath?: string
 }) {
   const location = useLocation()
 
-  const isActive =
-    location.pathname === to ||
-    (to !== location.pathname.replace(/\/[^/]+$/, '') && location.pathname.startsWith(`${to}/`))
+  const isActive = isNavLinkActive(location.pathname, to, matchPath)
 
   return (
     <Link
       to={to}
       onClick={onNavigate}
       className={cn(
-        'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
-        isActive && 'bg-sidebar-accent text-sidebar-accent-foreground'
+        'relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+        isActive &&
+          'bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-0 before:top-1/2 before:h-4 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-signal'
       )}
     >
-      <Icon className="h-4 w-4" />
+      <Icon className={cn('h-4 w-4', isActive ? 'text-signal' : 'text-muted-foreground')} />
       <span className="flex-1">{children}</span>
       {badge && badge > 0 ? (
         <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
           {badge}
         </Badge>
+      ) : null}
+      {badgeLabel ? (
+        <span className="font-mono text-xs tabular-nums text-status-danger">{badgeLabel}</span>
       ) : null}
     </Link>
   )
@@ -542,36 +538,44 @@ function NavLink({
   icon: Icon,
   children,
   badge,
+  badgeLabel,
+  matchPath,
 }: {
   to: string
   icon: React.ComponentType<{ className?: string }>
   children: React.ReactNode
   badge?: number
+  badgeLabel?: string
+  matchPath?: string
 }) {
   const location = useLocation()
 
-  // Check if this nav link is active
-  // For the base path (queues), we need to check if we're exactly on that path
-  // For other paths, we check if the current path starts with the link path
-  const isActive =
-    location.pathname === to ||
-    (to !== location.pathname.replace(/\/[^/]+$/, '') && location.pathname.startsWith(`${to}/`))
+  const isActive = isNavLinkActive(location.pathname, to, matchPath)
 
   return (
     <Link
       to={to}
       className={cn(
-        'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
-        isActive && 'bg-sidebar-accent text-sidebar-accent-foreground'
+        'relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+        isActive &&
+          'bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-0 before:top-1/2 before:h-4 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-signal'
       )}
     >
-      <Icon className="h-4 w-4" />
+      <Icon className={cn('h-4 w-4', isActive ? 'text-signal' : 'text-muted-foreground')} />
       <span className="flex-1">{children}</span>
       {badge && badge > 0 ? (
         <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
           {badge}
         </Badge>
       ) : null}
+      {badgeLabel ? (
+        <span className="font-mono text-xs tabular-nums text-status-danger">{badgeLabel}</span>
+      ) : null}
     </Link>
   )
+}
+
+function formatFailedJobsBadgeLabel(failedJobs: number | undefined): string | undefined {
+  if (!failedJobs || failedJobs <= 0) return undefined
+  return `(${formatCompactNumber(failedJobs)})`
 }

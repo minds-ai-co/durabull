@@ -40,6 +40,22 @@ export const redisDiscoveredQueueRepository = {
       .offset(options.offset)
   },
 
+  async findByConnectionAndName(
+    connectionId: string,
+    name: string
+  ): Promise<RedisDiscoveredQueue | null> {
+    const db = await getDb()
+    const rows = await db
+      .select()
+      .from(redisDiscoveredQueue)
+      .where(
+        and(eq(redisDiscoveredQueue.connectionId, connectionId), eq(redisDiscoveredQueue.name, name))
+      )
+      .limit(1)
+
+    return rows[0] ?? null
+  },
+
   async countByConnection(connectionId: string): Promise<number> {
     const db = await getDb()
     const [row] = await db

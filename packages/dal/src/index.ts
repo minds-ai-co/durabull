@@ -56,6 +56,21 @@ export {
   queueFilterModes,
 } from './db/schemas/alert-rule/schema'
 export type { AlertRule, NewAlertRule } from './db/schemas/alert-rule/types'
+export {
+  type AlertDestinationConfig,
+  type AlertDestinationType,
+  type AlertEmailDestinationConfig,
+  type AlertLinearDestinationConfig,
+  alertDestination,
+  alertDestinationTypes,
+  alertWebhookDestination,
+} from './db/schemas/alert-destination/schema'
+export type {
+  AlertDestination,
+  AlertWebhookDestination,
+  NewAlertDestination,
+  NewAlertWebhookDestination,
+} from './db/schemas/alert-destination/types'
 export * as authSchema from './db/schemas/auth/schema'
 // Auth schema exports for Better Auth integration
 export { authAccount, authSession, authVerification } from './db/schemas/auth/schema'
@@ -85,6 +100,24 @@ export type {
 } from './db/schemas/linear-job-issue-event/types'
 export { linearOauthState } from './db/schemas/linear-oauth-state/schema'
 export type { LinearOauthState, NewLinearOauthState } from './db/schemas/linear-oauth-state/types'
+export {
+  type McpPrincipalType,
+  mcpAuditEvent,
+  mcpPolicyBinding,
+  mcpPrincipalTypes,
+  mcpServiceAccount,
+  mcpServiceAccountSecret,
+} from './db/schemas/mcp-policy/schema'
+export type {
+  McpAuditEvent,
+  McpPolicyBinding,
+  McpServiceAccount,
+  McpServiceAccountSecret,
+  NewMcpAuditEvent,
+  NewMcpPolicyBinding,
+  NewMcpServiceAccount,
+  NewMcpServiceAccountSecret,
+} from './db/schemas/mcp-policy/types'
 export {
   oauthAccessToken,
   oauthApplication,
@@ -139,11 +172,22 @@ export {
 } from './db/secret-encryption'
 export { alertCheckCursorRepository } from './repositories/alert-check-cursor'
 export { alertDeliveryRepository } from './repositories/alert-delivery'
-export { alertEventRepository } from './repositories/alert-event'
+export {
+  type AlertEventWithAckUser,
+  type OrganizationOpenAlertSummary,
+  alertEventRepository,
+} from './repositories/alert-event'
 export { alertRuleRepository } from './repositories/alert-rule'
+export {
+  type CreateAlertDestinationInput,
+  type UpdateAlertDestinationInput,
+  alertDestinationRepository,
+  alertWebhookDestinationRepository,
+} from './repositories/alert-destination'
 export { linearIntegrationRepository } from './repositories/linear-integration'
 export { linearJobIssueRepository } from './repositories/linear-job-issue'
 export { linearOauthStateRepository } from './repositories/linear-oauth-state'
+export { mcpPolicyRepository } from './repositories/mcp-policy'
 // Repositories
 export { redisConnectionRepository } from './repositories/redis-connection'
 export { redisDiscoveredQueueRepository } from './repositories/redis-discovered-queue'

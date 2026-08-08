@@ -9,7 +9,7 @@ description: Complete runtime environment variable reference for local and produ
 | --- | --- | --- |
 | `NODE_ENV` | No | Runtime mode (`development`, `test`, `production`) |
 | `PORT` | No | API server port |
-| `APP_BASE_URL` | Recommended | Canonical app URL used by auth and email flows |
+| `APP_BASE_URL` | Required when `DURABULL_AUTHLESS=false` or MCP on public ingress | Canonical app URL for auth, email, and MCP OAuth resource `{APP_BASE_URL}/mcp` |
 | `VITE_PUBLIC_APP_URL` | Recommended | Public URL exposed to browser clients |
 
 ## Auth and Identity
@@ -17,7 +17,7 @@ description: Complete runtime environment variable reference for local and produ
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DURABULL_AUTHLESS` | No | Enable/disable authless mode |
-| `BETTER_AUTH_SECRET` | Required when auth enabled | Session/auth signing secret |
+| `BETTER_AUTH_SECRET` | Required for OAuth and shipped self-host Compose | Session/OAuth signing secret (set even for authless lab Compose) |
 | `GOOGLE_OAUTH_CLIENT_ID` | Optional | Google OAuth client ID |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | Optional | Google OAuth secret |
 | `GITHUB_OAUTH_CLIENT_ID` | Optional | GitHub OAuth client ID |
@@ -48,7 +48,8 @@ description: Complete runtime environment variable reference for local and produ
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `RESEND_API_KEY` | Optional | Invitation email delivery |
+| `RESEND_API_KEY` | Optional | Email delivery via Resend (invitations and alerts) |
+| `EMAIL_FROM` | No | Sender address for Resend emails (default: `Durabull <no-reply@durabull.io>`) |
 | `LINEAR_OAUTH_CLIENT_ID` | Required for Linear alert integrations | Linear OAuth application client ID |
 | `LINEAR_OAUTH_CLIENT_SECRET` | Required for Linear alert integrations | Linear OAuth application client secret |
 | `LINEAR_OAUTH_REDIRECT_URI` | Optional | Explicit Linear OAuth callback URL; defaults to `${APP_BASE_URL}/api/alerts/integrations/linear/callback` |
@@ -92,13 +93,37 @@ raw URLs, search patterns, stack traces, or raw error messages.
 Self-hosted deployments do not need a separate collector service or telemetry hostname. The app
 forwards sanitized telemetry to Durabull's existing cloud API.
 
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `DURABULL_TELEMETRY_COLLECT_SECRET` | Cloud + self-hosted telemetry forwarding | HMAC signing secret for batches sent to `/api/telemetry/collect` |
+| `DURABULL_TELEMETRY_HMAC_SECRET` | Production telemetry | Dedicated HMAC secret for anonymous instance and distinct identifiers. This is not derived from `BETTER_AUTH_SECRET`. |
+| `DURABULL_CLOUD` | Durabull cloud collector only | Enables cloud-only telemetry collection behavior |
+| `TRUST_PROXY` | Behind a trusted reverse proxy | Honors forwarding headers for rate limits and request context |
+
+Telemetry queue backpressure emits stdout JSON with `type: "telemetry_queue"` and
+`signal: "queue_dropped"`. These operational signals report queue names and counts only; they do not
+include user, organization, Redis, queue, job, key, URL, or payload values.
+
 ## Optional Runtime Toggles
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DISABLE_RATE_LIMIT` | No | Disable in-memory rate limiting |
 | `ASSET_PRELOAD_MAX_SIZE` | No | Asset preload tuning |
 | `ASSET_PRELOAD_VERBOSE_LOGGING` | No | Extra preload diagnostics |
+
+## MCP
+
+MCP is **always enabled** on the unified API deployment at `{APP_BASE_URL}/mcp`. No separate MCP port, service, or enable flag is required.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `APP_BASE_URL` | See Core Runtime | MCP host allowlist and OAuth resource URI (`{APP_BASE_URL}/mcp`) |
+| `DURABULL_AUTHLESS` | No | Must remain `false` on internet-facing deployments |
+| `DISABLE_RATE_LIMIT` | No | When `true`, disables **all** in-memory API + MCP rate limiting |
+| `MCP_TELEMETRY_LOG` | No | Set `false` to disable stdout `mcp_telemetry` JSON logs (runtime-only; default: enabled) |
+| `MCP_AUTHLESS_BEARER_TOKEN` | Authless + production | Strong bearer for isolated lab authless only — not for internet-facing production |
+
+See [MCP Server](/documentation/integrations/mcp-server) for scopes, tools, and client setup. Operators: [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md).
 
 ## Recommended Production Baseline
 

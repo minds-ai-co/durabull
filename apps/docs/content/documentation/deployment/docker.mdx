@@ -28,8 +28,9 @@ docker network create durabull
 
 docker run -d --name durabull-redis --network durabull redis:8-alpine
 
-docker run --rm -p 3000:3000 --network durabull \
+docker run --rm -p 127.0.0.1:3000:3000 --network durabull \
   -e DURABULL_AUTHLESS=true \
+  -e MCP_AUTHLESS_BEARER_TOKEN="$(openssl rand -hex 32)" \
   -e DURABULL_ENV_CONNECTIONS=true \
   -e DURABULL_REDIS_URL_ENCRYPTION_KEY=$(openssl rand -hex 32) \
   -e DURABULL_REDIS_URL_MAIN=redis://durabull-redis:6379 \
@@ -40,64 +41,34 @@ docker run --rm -p 3000:3000 --network durabull \
   ghcr.io/durabullhq/durabull:latest
 ```
 
+This quick-start uses **authless mode for local evaluation only** on **localhost** (`127.0.0.1:3000`). Authless grants owner-level access to the **entire** web UI and API, not only `/mcp`. `MCP_AUTHLESS_BEARER_TOKEN` protects MCP only. Never expose authless on LAN/WAN without perimeter controls.
+
+Production images use `NODE_ENV=production` and require `MCP_AUTHLESS_BEARER_TOKEN` when authless is enabled. For internet-facing deploys, use Compose with `DURABULL_AUTHLESS=false` and `BETTER_AUTH_SECRET`.
+
 Open `http://localhost:3000`, then confirm:
 
 - `GET /api/health` returns `status: ok`
 - `GET /api/app/config` returns JSON instead of `500`
 - the queue dashboard loads for your default connection
+- MCP discovery: `GET /.well-known/oauth-protected-resource` returns `resource` = `http://localhost:3000/mcp`
+
+MCP uses the **same port** as the app (`3000`). Do not publish a separate MCP port.
 
 ## 3) Docker Compose (Durabull + Redis)
 
-Use Compose for repeatable team setup:
+Use the maintained Compose file at `tooling/docker/docker-compose.self-hosted.yaml`:
 
-```yaml
-name: durabull-self-hosted
-
-services:
-  durabull:
-    image: ghcr.io/durabullhq/durabull:latest
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      DURABULL_AUTHLESS: "true"
-      DURABULL_ENV_CONNECTIONS: "true"
-      DURABULL_REDIS_URL_ENCRYPTION_KEY: "${DURABULL_REDIS_URL_ENCRYPTION_KEY}"
-      DURABULL_REDIS_URL_MAIN: redis://redis:6379
-      DURABULL_REDIS_URL_MAIN_ENVIRONMENT: development
-      DURABULL_REDIS_URL_DEFAULT: MAIN
-      APP_BASE_URL: http://localhost:3000
-      VITE_PUBLIC_APP_URL: http://localhost:3000
-    volumes:
-      - durabull_data:/app/data
-    depends_on:
-      redis:
-        condition: service_healthy
-
-  redis:
-    image: redis:8-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-    command: redis-server --appendonly yes
-
-volumes:
-  durabull_data:
-  redis_data:
-```
+- Single app port (`3000` by default) serves API, web, and MCP at `{APP_BASE_URL}/mcp`
+- Defaults `DURABULL_AUTHLESS` to `false` (OAuth production path)
+- For local authless evaluation only, set `DURABULL_AUTHLESS=true` and a strong `MCP_AUTHLESS_BEARER_TOKEN` when `NODE_ENV=production`
+- Redis is **not** published to the host in the shipped Compose file (internal network only). Do not add `6379:6379` in production
 
 Start it with:
 
 ```bash
 export DURABULL_REDIS_URL_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+export BETTER_AUTH_SECRET="$(openssl rand -hex 32)"
+# Optional for production: export APP_BASE_URL=https://your-domain.example
 docker compose -f tooling/docker/docker-compose.self-hosted.yaml up -d
 ```
 
@@ -105,9 +76,9 @@ Then validate:
 
 - `GET /api/health`
 - `GET /api/app/config`
-- `GET /api/auth/get-session` when `DURABULL_AUTHLESS=true`
-
-An example file is included at `tooling/docker/docker-compose.self-hosted.yaml`.
+- `GET /api/auth/get-session` (authless mode) or OAuth sign-in (default Compose)
+- `GET /.well-known/oauth-protected-resource` (MCP resource URI)
+- Full MCP smoke (staging/local only): see [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md)
 
 ## 4) Persistence Notes
 
@@ -133,9 +104,17 @@ For internet-facing deployments:
 - set `DURABULL_AUTHLESS=false`
 - configure `BETTER_AUTH_SECRET`
 - configure `DURABULL_REDIS_URL_ENCRYPTION_KEY`
-- set correct `APP_BASE_URL` and `VITE_PUBLIC_APP_URL`
+- set correct `APP_BASE_URL` and `VITE_PUBLIC_APP_URL` (required for MCP OAuth resource `{APP_BASE_URL}/mcp`)
 - review [Security and Hardening](/documentation/operations/security-and-hardening)
 - use PostgreSQL (`DATABASE_URL`) for stateful team environments
+- after deploy, follow [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md) (use staging for `mcp:e2e`)
+
+### MCP on self-hosted Docker
+
+- Endpoint: `{APP_BASE_URL}/mcp` on port `3000` (or `DURABULL_APP_PORT`)
+- **Production (internet-facing):** `DURABULL_AUTHLESS=false`, OAuth, required `APP_BASE_URL`
+- Authless is for isolated lab networks only — not a substitute for OAuth on production ingress
+- Details: [MCP Server](/documentation/integrations/mcp-server)
 
 ## 6) Build Image from Source
 

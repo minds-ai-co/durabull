@@ -81,6 +81,18 @@ describe('validateMcpAccessTokenClaims', () => {
     }
   })
 
+  it('accepts equivalent resource URIs with trailing slash differences', () => {
+    const result = validateMcpAccessTokenClaims(
+      baseClaims({ resource: 'https://app.example.com/mcp/' }),
+      {
+        canonicalResourceUri: 'https://app.example.com/mcp',
+        requiredScopes: [MCP_SCOPE_DISCOVER],
+      }
+    )
+
+    expect(result.ok).toBe(true)
+  })
+
   it('returns 403 with missing scopes when scope is insufficient', () => {
     const result = validateMcpAccessTokenClaims(baseClaims({ scopes: ['openid'] }), {
       canonicalResourceUri,

@@ -2,6 +2,8 @@ import type { Metrics, Queue, QueueMeta } from 'bullmq'
 
 export const DEFAULT_METRICS_WINDOW_MINUTES = 360
 export const MAX_METRICS_WINDOW_MINUTES = 80640
+/** Bounded window for MCP `get_queue_metrics` (24 hours). */
+export const MCP_MAX_METRICS_WINDOW_MINUTES = 1440
 export const DEFAULT_PRIORITY_BUCKETS = [1, 2, 5, 10, 20, 50] as const
 
 interface CollectNativeMetricsOptions {
@@ -376,5 +378,103 @@ export async function collectQueueNativeMetrics(
       metrics: prometheusMetrics,
     },
     warnings,
+  }
+}
+
+export async function collectQueueMcpMetricsSummary(
+  queue: Queue,
+  {
+    queueName,
+    windowMinutes,
+  }: {
+    queueName: string
+    windowMinutes: number
+  }
+) {
+  const requestedWindowMinutes = Math.min(
+    Math.max(Math.floor(windowMinutes), 1),
+    MCP_MAX_METRICS_WINDOW_MINUTES
+  )
+  const start = 0
+  const end = Math.max(requestedWindowMinutes - 1, 0)
+
+  const mcpWarnings: string[] = []
+  const [
+    completedMetrics,
+    failedMetrics,
+    jobCountsRaw,
+    waitingToProcess,
+    isPaused,
+    isMaxed,
+    workersCount,
+    schedulersCount,
+  ] = await Promise.all([
+    queue.getMetrics('completed', start, end),
+    queue.getMetrics('failed', start, end),
+    queue.getJobCounts(),
+    queue.count(),
+    queue.isPaused(),
+    safeCall(() => queue.isMaxed(), false, 'isMaxed unavailable', mcpWarnings),
+    queue.getWorkersCount(),
+    queue.getJobSchedulersCount(),
+  ])
+
+  const series = buildSeriesPoints(completedMetrics, failedMetrics, start)
+  const completedInWindow = series.reduce((sum, point) => sum + point.completed, 0)
+  const failedInWindow = series.reduce((sum, point) => sum + point.failed, 0)
+  const finishedInWindow = completedInWindow + failedInWindow
+  const minutesInWindow = series.length
+  const avgFinishedPerMinuteInWindow = minutesInWindow > 0 ? finishedInWindow / minutesInWindow : 0
+  const longestFailureStreakMinutesInWindow = longestStreak(series, (point) => point.failed > 0)
+  const longestCompletionStreakMinutesInWindow = longestStreak(
+    series,
+    (point) => point.completed > 0
+  )
+  const lifetimeCompleted = completedMetrics.meta.count
+  const lifetimeFailed = failedMetrics.meta.count
+  const lifetimeFinished = lifetimeCompleted + lifetimeFailed
+
+  return {
+    queueName,
+    range: {
+      requestedWindowMinutes,
+      returnedPoints: series.length,
+      oldestPointTimestamp: series.length > 0 ? series[0].timestamp : null,
+      newestPointTimestamp: series.length > 0 ? series[series.length - 1].timestamp : null,
+      latestPointAgeMs:
+        series.length > 0
+          ? Math.max(Date.now() - series[series.length - 1].timestamp, 0)
+          : null,
+      requestedWindowCoverage:
+        requestedWindowMinutes > 0
+          ? Math.min(series.length / requestedWindowMinutes, 1)
+          : null,
+    },
+    totals: {
+      completedInWindow,
+      failedInWindow,
+      finishedInWindow,
+      successRateInWindow: finishedInWindow > 0 ? completedInWindow / finishedInWindow : 1,
+      failureRateInWindow: finishedInWindow > 0 ? failedInWindow / finishedInWindow : 0,
+      avgCompletedPerMinuteInWindow:
+        minutesInWindow > 0 ? completedInWindow / minutesInWindow : 0,
+      avgFailedPerMinuteInWindow: minutesInWindow > 0 ? failedInWindow / minutesInWindow : 0,
+      longestFailureStreakMinutesInWindow,
+      longestCompletionStreakMinutesInWindow,
+      completedLifetime: lifetimeCompleted,
+      failedLifetime: lifetimeFailed,
+      failureRateLifetime: lifetimeFinished > 0 ? lifetimeFailed / lifetimeFinished : 0,
+      estimatedDrainMinutes:
+        avgFinishedPerMinuteInWindow > 0 ? waitingToProcess / avgFinishedPerMinuteInWindow : null,
+    },
+    counts: parseCounts(jobCountsRaw),
+    queue: {
+      isPaused,
+      isMaxed,
+      waitingToProcess,
+      workersCount,
+      schedulersCount,
+    },
+    warnings: mcpWarnings.map(() => 'One or more queue metrics were unavailable.'),
   }
 }

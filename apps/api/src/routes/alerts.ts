@@ -1,8 +1,11 @@
 import {
   alertCheckCursorRepository,
   alertDeliveryRepository,
+  alertDestinationRepository,
   alertEventRepository,
   alertRuleRepository,
+  alertWebhookDestinationRepository,
+  decryptSecret,
   eq,
   getDb,
   linearIntegrationRepository,
@@ -13,10 +16,12 @@ import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { type CursorState, evaluateRule, type QueueSnapshot } from '../lib/alert-evaluator'
+import { processAlertDeliveries } from '../lib/alert-notifier'
+import { syncLinearIssuesForResolvedEvents } from '../lib/alert-resolution'
 import {
   mergeWebhookSecretsOnUpdate,
   resolveWebhookTestSecret,
-  sanitizeDeliveryProviderMetadata,
+  sanitizeAlertDeliveryForClient,
   sanitizeNotificationChannels,
   validateWebhookUrls,
 } from '../lib/alert-webhook-channels'
@@ -41,15 +46,31 @@ const linearNotificationChannelSchema = z.object({
   stateId: z.string().min(1).optional(),
   priority: z.number().int().min(0).max(4).optional(),
 })
-const webhookNotificationChannelSchema = z.object({
-  type: z.literal('webhook'),
-  url: z.string().url().max(2048),
-  secret: z.string().min(16).max(256).optional(),
-})
-const notificationChannelSchema = z.discriminatedUnion('type', [
+const webhookNotificationChannelSchema = z
+  .object({
+    type: z.literal('webhook'),
+    url: z.string().url().max(2048),
+    secret: z.string().min(16).max(256).optional(),
+  })
+  .strict()
+const savedWebhookNotificationChannelSchema = z
+  .object({
+    type: z.literal('webhook'),
+    destinationId: z.string().uuid(),
+  })
+  .strict()
+const destinationNotificationChannelSchema = z
+  .object({
+    type: z.literal('destination'),
+    destinationId: z.string().uuid(),
+  })
+  .strict()
+const notificationChannelSchema = z.union([
   emailNotificationChannelSchema,
   linearNotificationChannelSchema,
   webhookNotificationChannelSchema,
+  savedWebhookNotificationChannelSchema,
+  destinationNotificationChannelSchema,
 ])
 
 const testWebhookSchema = z.object({
@@ -82,6 +103,29 @@ const updateRuleSchema = z.object({
   enabled: z.boolean().optional(),
 })
 
+const snoozeRuleSchema = z.object({
+  // Up to 7 days.
+  minutes: z.number().int().min(1).max(10080),
+})
+
+type AlertRuleRow = Awaited<ReturnType<typeof alertRuleRepository.findByConnection>>[number]
+
+function computeRuleState(rule: AlertRuleRow): 'active' | 'snoozed' | 'disabled' {
+  if (!rule.enabled) return 'disabled'
+  if (rule.mutedUntil && rule.mutedUntil.getTime() > Date.now()) return 'snoozed'
+  return 'active'
+}
+
+function serializeAlertRule(rule: AlertRuleRow) {
+  return {
+    ...rule,
+    state: computeRuleState(rule),
+    notificationChannels: sanitizeNotificationChannels(
+      Array.isArray(rule.notificationChannels) ? rule.notificationChannels : []
+    ),
+  }
+}
+
 const app = new Hono()
   .get('/rules', async (c) => {
     const connectionId = c.get('connectionId')
@@ -91,12 +135,30 @@ const app = new Hono()
     }
 
     const rules = await alertRuleRepository.findByConnection(connectionId, organizationId)
+
+    // Sidecar with the referenced destinations so the UI can render names
+    // without another round-trip or mutating the channel payloads.
+    const referencedIds = new Set<string>()
+    for (const rule of rules) {
+      for (const channel of Array.isArray(rule.notificationChannels)
+        ? rule.notificationChannels
+        : []) {
+        const destinationId = (channel as { destinationId?: unknown }).destinationId
+        if (typeof destinationId === 'string') referencedIds.add(destinationId)
+      }
+    }
+    const destinations = await alertDestinationRepository.listByIds(
+      [...referencedIds],
+      organizationId
+    )
+
     return c.json({
-      rules: rules.map((rule) => ({
-        ...rule,
-        notificationChannels: sanitizeNotificationChannels(
-          Array.isArray(rule.notificationChannels) ? rule.notificationChannels : []
-        ),
+      rules: rules.map(serializeAlertRule),
+      destinations: destinations.map((destination) => ({
+        id: destination.id,
+        name: destination.name,
+        type: destination.type,
+        enabled: destination.enabled,
       })),
     })
   })
@@ -131,17 +193,7 @@ const app = new Hono()
       organizationId,
     })
 
-    return c.json(
-      {
-        rule: {
-          ...rule,
-          notificationChannels: sanitizeNotificationChannels(
-            Array.isArray(rule.notificationChannels) ? rule.notificationChannels : []
-          ),
-        },
-      },
-      201
-    )
+    return c.json({ rule: serializeAlertRule(rule) }, 201)
   })
   .patch('/rules/:ruleId', zValidator('json', updateRuleSchema), async (c) => {
     const { ruleId } = c.req.param()
@@ -187,14 +239,7 @@ const app = new Hono()
       await alertEventRepository.resolveAllForRule(rule.id)
     }
 
-    return c.json({
-      rule: {
-        ...rule,
-        notificationChannels: sanitizeNotificationChannels(
-          Array.isArray(rule.notificationChannels) ? rule.notificationChannels : []
-        ),
-      },
-    })
+    return c.json({ rule: serializeAlertRule(rule) })
   })
   .delete('/rules/:ruleId', async (c) => {
     const { ruleId } = c.req.param()
@@ -213,6 +258,41 @@ const app = new Hono()
 
     return c.json({ success: true })
   })
+  .post('/rules/:ruleId/snooze', zValidator('json', snoozeRuleSchema), async (c) => {
+    const { ruleId } = c.req.param()
+    const { minutes } = c.req.valid('json')
+    const organizationId = c.get('organizationId')
+    if (!organizationId) {
+      return c.json({ error: 'Organization is required' }, 403)
+    }
+
+    // Snooze silences the rule without resolving its open incidents — they
+    // stay frozen and resolve on the first poll after the snooze expires.
+    const rule = await alertRuleRepository.setMutedUntil(
+      ruleId,
+      organizationId,
+      new Date(Date.now() + minutes * 60_000)
+    )
+    if (!rule) {
+      return c.json({ error: 'Rule not found' }, 404)
+    }
+
+    return c.json({ rule: serializeAlertRule(rule) })
+  })
+  .delete('/rules/:ruleId/snooze', async (c) => {
+    const { ruleId } = c.req.param()
+    const organizationId = c.get('organizationId')
+    if (!organizationId) {
+      return c.json({ error: 'Organization is required' }, 403)
+    }
+
+    const rule = await alertRuleRepository.setMutedUntil(ruleId, organizationId, null)
+    if (!rule) {
+      return c.json({ error: 'Rule not found' }, 404)
+    }
+
+    return c.json({ rule: serializeAlertRule(rule) })
+  })
   .post(
     '/rules/:ruleId/test',
     zValidator(
@@ -222,124 +302,140 @@ const app = new Hono()
       })
     ),
     async (c) => {
-    const { ruleId } = c.req.param()
-    const { deliver: deliverQuery } = c.req.valid('query')
-    const deliver = deliverQuery === 'true'
-    const connectionId = c.get('connectionId')
-    const connectionUrl = c.get('connectionUrl')
-    const connectionPrefix = c.get('connectionPrefix')
-    const redisOptions = getConnectionRedisOptions(c)
-    const connectionName = c.get('connectionName')
-    const organizationId = c.get('organizationId')
-    if (!organizationId) {
-      return c.json({ error: 'Organization is required' }, 403)
-    }
+      const { ruleId } = c.req.param()
+      const { deliver: deliverQuery } = c.req.valid('query')
+      const deliver = deliverQuery === 'true'
+      const connectionId = c.get('connectionId')
+      const connectionUrl = c.get('connectionUrl')
+      const connectionPrefix = c.get('connectionPrefix')
+      const redisOptions = getConnectionRedisOptions(c)
+      const connectionName = c.get('connectionName')
+      const organizationId = c.get('organizationId')
+      if (!organizationId) {
+        return c.json({ error: 'Organization is required' }, 403)
+      }
 
-    const rule = await alertRuleRepository.findById(ruleId, organizationId)
-    if (!rule) {
-      return c.json({ error: 'Rule not found' }, 404)
-    }
+      const rule = await alertRuleRepository.findById(ruleId, organizationId)
+      if (!rule) {
+        return c.json({ error: 'Rule not found' }, 404)
+      }
 
-    let queueName = rule.queueName
-    if (!queueName) {
-      const discovered = await redisDiscoveredQueueRepository.listByConnection(connectionId, {
-        offset: 0,
-        limit: 1,
-      })
-      queueName = discovered[0]?.name ?? null
-    }
-    if (!queueName) {
-      return c.json({ error: 'No queue available to test this rule yet' }, 400)
-    }
-
-    const queue = await getQueue(connectionId, connectionUrl, queueName, connectionPrefix, redisOptions)
-    const [jobCountsRaw, failedMetricsRaw, completedMetricsRaw] = await Promise.all([
-      queue.getJobCounts('failed', 'waiting', 'active', 'completed'),
-      queue.getMetrics('failed', 0, 60),
-      queue.getMetrics('completed', 0, 60),
-    ])
-
-    const snapshot: QueueSnapshot = {
-      queueName,
-      connectionName,
-      jobCounts: {
-        failed: jobCountsRaw.failed ?? 0,
-        waiting: jobCountsRaw.waiting ?? 0,
-        active: jobCountsRaw.active ?? 0,
-        completed: jobCountsRaw.completed ?? 0,
-      },
-      failedMetrics: {
-        count: failedMetricsRaw.meta.count,
-        dataPoints: failedMetricsRaw.data,
-      },
-      completedMetrics: {
-        count: completedMetricsRaw.meta.count,
-        dataPoints: completedMetricsRaw.data,
-      },
-    }
-
-    const cursorRow = await alertCheckCursorRepository.findByConnectionQueue(
-      connectionId,
-      queueName
-    )
-    const cursor: CursorState | null = cursorRow
-      ? {
-          lastCheckedAt: cursorRow.lastCheckedAt,
-          lastFailedCount: cursorRow.lastFailedCount,
-          lastCompletedCount: cursorRow.lastCompletedCount,
-        }
-      : null
-
-    const evaluation = evaluateRule(rule, snapshot, cursor)
-
-    const webhookChannels = (Array.isArray(rule.notificationChannels) ? rule.notificationChannels : [])
-      .filter(
-        (channel): channel is { type: 'webhook'; url: string; secret?: string } =>
-          typeof channel === 'object' &&
-          channel !== null &&
-          (channel as { type?: string }).type === 'webhook' &&
-          typeof (channel as { url?: string }).url === 'string'
-      )
-
-    let webhookTests:
-      | Array<{
-          url: string
-          success: boolean
-          httpStatus: number | null
-          durationMs: number
-          error?: string
-        }>
-      | undefined
-
-    if (deliver && webhookChannels.length > 0) {
-      const organizationSlug = await getOrganizationSlug(organizationId)
-      webhookTests = await Promise.all(
-        webhookChannels.map(async (channel) => {
-          const result = await sendRateLimitedTestWebhook({
-            url: channel.url,
-            secret: channel.secret,
-            organizationId,
-            organizationSlug,
-            connectionId,
-            connectionName,
-            ruleId: rule.id,
-            ruleName: rule.name,
-            ruleType: rule.type,
-            queueName,
-          })
-          return {
-            url: channel.url,
-            success: result.success,
-            httpStatus: result.httpStatus,
-            durationMs: result.durationMs,
-            error: result.error,
-          }
+      let queueName = rule.queueName
+      if (!queueName) {
+        const discovered = await redisDiscoveredQueueRepository.listByConnection(connectionId, {
+          offset: 0,
+          limit: 1,
         })
-      )
-    }
+        queueName = discovered[0]?.name ?? null
+      }
+      if (!queueName) {
+        return c.json({ error: 'No queue available to test this rule yet' }, 400)
+      }
 
-    return c.json({ evaluation, snapshot, webhookTests })
-  })
+      const queue = await getQueue(
+        connectionId,
+        connectionUrl,
+        queueName,
+        connectionPrefix,
+        redisOptions
+      )
+      const [jobCountsRaw, failedMetricsRaw, completedMetricsRaw] = await Promise.all([
+        queue.getJobCounts('failed', 'waiting', 'active', 'completed'),
+        queue.getMetrics('failed', 0, 60),
+        queue.getMetrics('completed', 0, 60),
+      ])
+
+      const snapshot: QueueSnapshot = {
+        queueName,
+        connectionName,
+        jobCounts: {
+          failed: jobCountsRaw.failed ?? 0,
+          waiting: jobCountsRaw.waiting ?? 0,
+          active: jobCountsRaw.active ?? 0,
+          completed: jobCountsRaw.completed ?? 0,
+        },
+        failedMetrics: {
+          count: failedMetricsRaw.meta.count,
+          dataPoints: failedMetricsRaw.data,
+        },
+        completedMetrics: {
+          count: completedMetricsRaw.meta.count,
+          dataPoints: completedMetricsRaw.data,
+        },
+      }
+
+      const cursorRow = await alertCheckCursorRepository.findByConnectionQueue(
+        connectionId,
+        queueName
+      )
+      const cursor: CursorState | null = cursorRow
+        ? {
+            lastCheckedAt: cursorRow.lastCheckedAt,
+            lastFailedCount: cursorRow.lastFailedCount,
+            lastCompletedCount: cursorRow.lastCompletedCount,
+          }
+        : null
+
+      const evaluation = evaluateRule(rule, snapshot, cursor)
+
+      const notificationChannels = Array.isArray(rule.notificationChannels)
+        ? rule.notificationChannels
+        : []
+
+      let webhookTests:
+        | Array<{
+            url: string
+            success: boolean
+            httpStatus: number | null
+            durationMs: number
+            error?: string
+          }>
+        | undefined
+
+      if (deliver) {
+        const webhookChannels = await resolveWebhookTestChannels(
+          notificationChannels,
+          organizationId
+        )
+        const organizationSlug = await getOrganizationSlug(organizationId)
+        webhookTests = await Promise.all(
+          webhookChannels.map(async (channel) => {
+            if ('error' in channel) {
+              return {
+                url: channel.url,
+                success: false,
+                httpStatus: null,
+                durationMs: 0,
+                error: channel.error,
+              }
+            }
+
+            const result = await sendRateLimitedTestWebhook({
+              url: channel.url,
+              secret: channel.secret,
+              organizationId,
+              organizationSlug,
+              connectionId,
+              connectionName,
+              ruleId: rule.id,
+              ruleName: rule.name,
+              ruleType: rule.type,
+              queueName,
+            })
+            return {
+              url: channel.url,
+              success: result.success,
+              httpStatus: result.httpStatus,
+              durationMs: result.durationMs,
+              error: result.error,
+            }
+          })
+        )
+      }
+
+      return c.json({ evaluation, snapshot, webhookTests })
+    }
+  )
   .post('/webhooks/test', zValidator('json', testWebhookSchema), async (c) => {
     const body = c.req.valid('json')
     const connectionId = c.get('connectionId')
@@ -406,10 +502,13 @@ const app = new Hono()
         status: alertEventStatusSchema.optional(),
         queueName: z.string().min(1).optional(),
         jobId: z.string().min(1).optional(),
+        acknowledged: z.enum(['true', 'false']).optional(),
+        alertRuleId: z.string().uuid().optional(),
       })
     ),
     async (c) => {
-      const { offset, limit, status, queueName, jobId } = c.req.valid('query')
+      const { offset, limit, status, queueName, jobId, acknowledged, alertRuleId } =
+        c.req.valid('query')
       const connectionId = c.get('connectionId')
       const organizationId = c.get('organizationId')
       if (!organizationId) {
@@ -422,35 +521,154 @@ const app = new Hono()
         status,
         queueName,
         jobId,
+        acknowledged: acknowledged === undefined ? undefined : acknowledged === 'true',
+        alertRuleId,
       })
       return c.json({ events: await attachDeliveries(events) })
     }
   )
+  .post(
+    '/events/resolve-bulk',
+    zValidator(
+      'json',
+      z.object({
+        eventIds: z.array(z.string().uuid()).min(1).max(500),
+      })
+    ),
+    async (c) => {
+      const { eventIds } = c.req.valid('json')
+      const connectionId = c.get('connectionId')
+      const organizationId = c.get('organizationId')
+      if (!organizationId) {
+        return c.json({ error: 'Organization is required' }, 403)
+      }
+
+      const resolvedEvents = await alertEventRepository.resolveMany(eventIds, organizationId, {
+        connectionId,
+      })
+
+      // Close linked Linear issues in the background — a bulk resolve can cover
+      // hundreds of incidents and must not block on external API calls.
+      if (resolvedEvents.length > 0) {
+        void syncLinearIssuesForResolvedEvents(resolvedEvents, { kind: 'manual' })
+      }
+
+      return c.json({
+        resolvedCount: resolvedEvents.length,
+        events: resolvedEvents,
+      })
+    }
+  )
   .post('/events/:eventId/resolve', async (c) => {
     const { eventId } = c.req.param()
+    const connectionId = c.get('connectionId')
     const organizationId = c.get('organizationId')
     if (!organizationId) {
       return c.json({ error: 'Organization is required' }, 403)
     }
+
+    const existing = await alertEventRepository.findById(eventId, organizationId)
+    if (!existing || existing.connectionId !== connectionId) {
+      return c.json({ error: 'Event not found' }, 404)
+    }
+    if (existing.status === 'suppressed') {
+      return c.json({ error: 'Suppressed events are informational and cannot be resolved.' }, 409)
+    }
+    const wasFiring = existing.status === 'firing'
 
     const event = await alertEventRepository.resolve(eventId, organizationId)
     if (!event) {
       return c.json({ error: 'Event not found' }, 404)
     }
 
+    if (wasFiring) {
+      void syncLinearIssuesForResolvedEvents([event], { kind: 'manual' })
+    }
+
     return c.json({ event })
+  })
+  .post('/events/:eventId/acknowledge', async (c) => {
+    const { eventId } = c.req.param()
+    const connectionId = c.get('connectionId')
+    const organizationId = c.get('organizationId')
+    const user = c.get('user')
+    if (!organizationId) {
+      return c.json({ error: 'Organization is required' }, 403)
+    }
+    if (!user) {
+      return c.json({ error: 'Authentication is required to acknowledge alerts' }, 401)
+    }
+
+    const existing = await alertEventRepository.findById(eventId, organizationId)
+    if (!existing || existing.connectionId !== connectionId) {
+      return c.json({ error: 'Event not found' }, 404)
+    }
+
+    const event = await alertEventRepository.acknowledge(eventId, organizationId, user.id)
+    if (!event) {
+      return c.json({ error: 'Only unacknowledged firing events can be acknowledged.' }, 409)
+    }
+
+    return c.json({ event: { ...event, acknowledgedByName: user.name } })
+  })
+  .delete('/events/:eventId/acknowledge', async (c) => {
+    const { eventId } = c.req.param()
+    const connectionId = c.get('connectionId')
+    const organizationId = c.get('organizationId')
+    if (!organizationId) {
+      return c.json({ error: 'Organization is required' }, 403)
+    }
+
+    const existing = await alertEventRepository.findById(eventId, organizationId)
+    if (!existing || existing.connectionId !== connectionId) {
+      return c.json({ error: 'Event not found' }, 404)
+    }
+
+    const event = await alertEventRepository.unacknowledge(eventId, organizationId)
+    if (!event) {
+      return c.json({ error: 'Only acknowledged firing events can be unacknowledged.' }, 409)
+    }
+
+    return c.json({ event: { ...event, acknowledgedByName: null } })
+  })
+  .post('/events/:eventId/deliveries/:deliveryId/retry', async (c) => {
+    const { eventId, deliveryId } = c.req.param()
+    const connectionId = c.get('connectionId')
+    const organizationId = c.get('organizationId')
+    if (!organizationId) {
+      return c.json({ error: 'Organization is required' }, 403)
+    }
+
+    const event = await alertEventRepository.findById(eventId, organizationId)
+    if (!event || event.connectionId !== connectionId) {
+      return c.json({ error: 'Event not found' }, 404)
+    }
+
+    const reset = await alertDeliveryRepository.resetForRetry(deliveryId, eventId)
+    if (!reset) {
+      return c.json({ error: 'Delivery not found or is not in a retryable state.' }, 404)
+    }
+
+    // Dispatch only needs the connection identity, which the connection
+    // middleware already resolved into context — no refetch/decrypt required.
+    const connection = { id: connectionId, name: c.get('connectionName') }
+
+    const rule = await alertRuleRepository.findById(event.alertRuleId, organizationId)
+    await processAlertDeliveries(event, connection, rule?.name ?? 'Durabull alert', {
+      deliveryId,
+    })
+
+    const [refreshed] = await attachDeliveries([event])
+    return c.json({ event: refreshed })
   })
 
 async function attachDeliveries<T extends { id: string }>(events: T[]) {
   return Promise.all(
     events.map(async (event) => ({
       ...event,
-      deliveries: (await alertDeliveryRepository.listByEvent(event.id)).map((delivery) => ({
-        ...delivery,
-        providerMetadata: sanitizeDeliveryProviderMetadata(
-          delivery.providerMetadata as Record<string, unknown> | null | undefined
-        ),
-      })),
+      deliveries: (await alertDeliveryRepository.listByEvent(event.id)).map((delivery) =>
+        sanitizeAlertDeliveryForClient(delivery)
+      ),
     }))
   )
 }
@@ -497,10 +715,65 @@ async function validateNotificationChannels(
   channels: z.infer<typeof notificationChannelSchema>[],
   organizationId: string
 ): Promise<string | null> {
-  const webhookError = await validateWebhookUrls(
-    channels.filter((channel) => channel.type === 'webhook')
+  const inlineWebhookChannels = channels.filter(
+    (channel): channel is z.infer<typeof webhookNotificationChannelSchema> =>
+      channel.type === 'webhook' && 'url' in channel
   )
+  const inlineWebhookTargets = new Set<string>()
+  for (const channel of inlineWebhookChannels) {
+    if (inlineWebhookTargets.has(channel.url)) {
+      return 'Duplicate custom webhook URLs are not allowed on the same alert rule.'
+    }
+    inlineWebhookTargets.add(channel.url)
+  }
+  const webhookError = await validateWebhookUrls(inlineWebhookChannels)
   if (webhookError) return webhookError
+
+  // Duplicates are checked across both the legacy saved-webhook variant and
+  // the generalized destination variant — the same destination referenced via
+  // both would enqueue two deliveries for every incident.
+  const referencedDestinationIds = new Set<string>()
+  for (const channel of channels) {
+    const isSavedWebhook = channel.type === 'webhook' && 'destinationId' in channel
+    const isDestination = channel.type === 'destination'
+    if (!isSavedWebhook && !isDestination) continue
+
+    if (referencedDestinationIds.has(channel.destinationId)) {
+      return 'Each destination can only be routed once per alert rule.'
+    }
+    referencedDestinationIds.add(channel.destinationId)
+
+    const destination = await alertDestinationRepository.findById(
+      channel.destinationId,
+      organizationId
+    )
+    if (!destination) {
+      return isDestination ? 'Notification destination not found.' : 'Webhook destination not found.'
+    }
+    if (isSavedWebhook && destination.type !== 'webhook') {
+      return `Destination "${destination.name}" is not a webhook destination.`
+    }
+    if (!destination.enabled) {
+      return `Destination "${destination.name}" is disabled.`
+    }
+    if (destination.type === 'webhook' && destination.encryptedSigningSecret) {
+      try {
+        decryptSecret(destination.encryptedSigningSecret)
+      } catch {
+        return `Webhook destination "${destination.name}" signing secret could not be decrypted.`
+      }
+    }
+    if (destination.type === 'linear') {
+      const integration = await linearIntegrationRepository.findByOrganization(organizationId)
+      if (!integration || integration.validationStatus !== 'valid') {
+        return 'Linear integration must be configured and valid before Linear alert routing can be enabled.'
+      }
+      const config = (destination.config ?? {}) as { teamId?: string }
+      if (!config.teamId && !integration.defaultTeamId) {
+        return 'Linear alert routing requires a teamId or organization default team.'
+      }
+    }
+  }
 
   const linearChannels = channels.filter((channel) => channel.type === 'linear')
   if (linearChannels.length > 1) {
@@ -517,6 +790,84 @@ async function validateNotificationChannels(
     (channel) => !channel.teamId && !integration.defaultTeamId
   )
   return missingTeam ? 'Linear alert routing requires a teamId or organization default team.' : null
+}
+
+type WebhookTestChannel =
+  | {
+      url: string
+      secret?: string
+    }
+  | {
+      url: string
+      error: string
+    }
+
+async function resolveWebhookTestChannels(
+  channels: unknown[],
+  organizationId: string
+): Promise<WebhookTestChannel[]> {
+  const results: WebhookTestChannel[] = []
+
+  for (const channel of channels) {
+    if (
+      typeof channel !== 'object' ||
+      channel === null ||
+      (channel as { type?: string }).type !== 'webhook'
+    ) {
+      continue
+    }
+
+    const url = (channel as { url?: unknown }).url
+    if (typeof url === 'string') {
+      results.push({
+        url,
+        secret:
+          typeof (channel as { secret?: unknown }).secret === 'string'
+            ? (channel as { secret: string }).secret
+            : undefined,
+      })
+      continue
+    }
+
+    const destinationId = (channel as { destinationId?: unknown }).destinationId
+    if (typeof destinationId !== 'string') continue
+
+    const destination = await alertWebhookDestinationRepository.findById(
+      destinationId,
+      organizationId
+    )
+    if (!destination || !destination.url) {
+      results.push({
+        url: `destination:${destinationId}`,
+        error: 'Webhook destination not found.',
+      })
+      continue
+    }
+    const destinationUrl = destination.url
+    if (!destination.enabled) {
+      results.push({
+        url: destinationUrl,
+        error: `Webhook destination "${destination.name}" is disabled.`,
+      })
+      continue
+    }
+
+    try {
+      results.push({
+        url: destinationUrl,
+        secret: destination.encryptedSigningSecret
+          ? decryptSecret(destination.encryptedSigningSecret)
+          : undefined,
+      })
+    } catch {
+      results.push({
+        url: destinationUrl,
+        error: `Webhook destination "${destination.name}" signing secret could not be decrypted.`,
+      })
+    }
+  }
+
+  return results
 }
 
 async function getOrganizationSlug(organizationId: string): Promise<string | null> {

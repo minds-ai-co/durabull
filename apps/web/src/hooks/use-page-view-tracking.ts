@@ -1,4 +1,4 @@
-import { trackPageView } from '@durabull/analytics'
+import { trackPageView } from '@durabull/analytics/browser'
 import { useLocation } from '@tanstack/react-router'
 import { useEffect, useRef } from 'react'
 

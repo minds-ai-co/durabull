@@ -13,7 +13,44 @@ export {
 } from './constants'
 export { createMcpRoutes, type CreateMcpRoutesOptions } from './routes'
 export {
+  getMcpRequestContext,
+  runWithMcpRequestContext,
+} from './request-context'
+export type {
+  McpRequestContext,
+  McpRequestPrincipal,
+  McpResolvedConnection,
+  McpToolInvocationAuditInput,
+} from './request-context'
+export {
   getCanonicalMcpResourceUri,
   getMcpProtectedResourceMetadataUrl,
   MCP_TRANSPORT_REQUIRED_SCOPES,
 } from './auth'
+export type {
+  ExplainJobFailureHandlerInput,
+  ExplainJobFailureHandlerOutput,
+  GetFailureEventsHandlerInput,
+  GetFailureEventsHandlerOutput,
+  GetJobHandlerInput,
+  GetJobHandlerOutput,
+  GetJobLogsHandlerInput,
+  GetJobLogsHandlerOutput,
+  GetJobStacktracesHandlerInput,
+  GetJobStacktracesHandlerOutput,
+  GetQueueHandlerInput,
+  GetQueueHandlerOutput,
+  GetQueueMetricsHandlerInput,
+  GetQueueMetricsHandlerOutput,
+  GetWorkersHandlerInput,
+  GetWorkersHandlerOutput,
+  ListConnectionsHandlerInput,
+  ListConnectionsHandlerOutput,
+  ListJobsHandlerInput,
+  ListJobsHandlerOutput,
+  ListQueuesHandlerInput,
+  ListQueuesHandlerOutput,
+  RegisterReadToolsOptions,
+  ResolveAlertEventHandlerInput,
+  ResolveAlertEventHandlerOutput,
+} from './tools/register-read-tools'

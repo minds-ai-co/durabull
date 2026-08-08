@@ -1,4 +1,4 @@
-import { configureDurabullTelemetry } from '@durabull/analytics'
+import { configureDurabullTelemetry } from '@durabull/analytics/browser'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 import { StrictMode } from 'react'
