@@ -21,9 +21,12 @@ automatically when `main` changes the deployment files under `deploy/` or the
 workflow itself. Application-code-only changes do not redeploy the pinned
 upstream image. After DigitalOcean activates the deployment, the workflow uses
 Cloudflare Access to verify protected health, authless mode, the Production and
-Staging connections, the dashboard HTML, rejection of MCP requests without the
-Durabull bearer, and a successful authenticated MCP initialization. An
-authorized owner can also use `workflow_dispatch` for a manual redeployment.
+Staging connections, synchronous Redis queue discovery and queue metrics from
+both environments, the dashboard HTML, rejection of MCP requests without the
+Durabull bearer, and a successful authenticated MCP initialization. The
+workflow also keeps the standalone app registered as an explicit trusted source
+on the production Valkey firewall. An authorized owner can also use
+`workflow_dispatch` for a manual redeployment.
 
 The Cloudflare Tunnel must be remotely configured with:
 
