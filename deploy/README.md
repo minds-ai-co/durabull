@@ -9,6 +9,12 @@ DigitalOcean app contains:
 - both Minds Valkey connections, labelled `Production` and `Staging` in the
   Durabull UI.
 
+The non-secret `DURABULL_PROCESSOR_COMPONENTS` metadata records the deployed
+Minds worker boundaries (`processor-build-p1`, `processor-build-p2`,
+`processor-interactive`, and `processor-background`) and their processor names.
+Durabull uses it to group Redis workloads by the compute component that runs
+them; new or unmapped workloads remain visible as unassigned.
+
 The canonical URL is `https://durabull.getminds.ai`. Cloudflare Access remains
 the user-facing authentication boundary. Durabull runs in authless mode behind
 that boundary, so internal users do not need to create a second Durabull

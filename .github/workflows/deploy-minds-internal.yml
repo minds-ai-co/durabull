@@ -299,6 +299,26 @@ jobs:
           jq -r '.result.content[0].text' "$list_connections_json" \
             > "$RUNNER_TEMP/durabull-mcp-connections.json"
 
+          production_connection_id=$(jq -er \
+            '.connections[] | select(.name == "Production") | .id' \
+            "$RUNNER_TEMP/durabull-mcp-connections.json")
+          workers_body="$RUNNER_TEMP/durabull-workers.json"
+          curl -fsS \
+            --max-time 30 \
+            -o "$workers_body" \
+            "${access_headers[@]}" \
+            "$base_url/api/c/$production_connection_id/workers?pageSize=1"
+          jq -e '
+            (.processorComponents | map(.name)) == [
+              "processor-build-p1",
+              "processor-build-p2",
+              "processor-interactive",
+              "processor-background"
+            ] and
+            (.processorComponents | map(.processors[]) | length) == 38 and
+            (.processorComponents | map(.processors[]) | unique | length) == 38
+          ' "$workers_body" >/dev/null
+
           for connection_name in Production Staging; do
             connection_id=$(jq -er \
               --arg name "$connection_name" \
@@ -357,7 +377,7 @@ jobs:
                 .image.tag == $build_id
               ' >/dev/null
 
-          echo "Cloudflare path isolation, immutable image, 13 MCP tool annotations, Production/Staging connections, and live Redis queue reads through MCP: ok"
+          echo "Cloudflare path isolation, immutable image, processor-component topology, 13 MCP tool annotations, Production/Staging connections, and live Redis queue reads through MCP: ok"
 
       - name: Record deployment boundary
         run: |
@@ -367,7 +387,7 @@ jobs:
             echo "- DigitalOcean app: \`minds-durabull-internal\`"
             echo "- Public DigitalOcean ingress: none"
             echo "- Origin path: Cloudflare Tunnel → \`http://durabull:3000\`"
-            echo "- Cloudflare dashboard isolation, MCP dual-auth boundary, immutable source image, 13 MCP tools/annotations, Production/Staging connections, and live Redis queue reads through MCP: verified"
+            echo "- Cloudflare dashboard isolation, MCP dual-auth boundary, immutable source image, four processor components/38 workloads, 13 MCP tools/annotations, Production/Staging connections, and live Redis queue reads through MCP: verified"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove rendered secret material

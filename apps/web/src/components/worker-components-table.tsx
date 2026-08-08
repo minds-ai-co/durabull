@@ -15,6 +15,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import type { ListWorkersResponse } from '@/hooks/use-queues'
+import { processorComponentOwner, UNASSIGNED_COMPONENT_NAME } from '@/lib/processor-components'
 import { cn, formatDuration } from '@/lib/utils'
 
 type ComponentType = 'processor' | 'worker'
@@ -25,6 +26,7 @@ type ComponentRow =
       type: 'processor'
       name: string
       queueName: string
+      componentName: string
       observedJobs: number
     }
   | {
@@ -32,6 +34,7 @@ type ComponentRow =
       type: 'worker'
       name: string
       queueName: string
+      componentName: string
       address: string
       age: number
       idle: number
@@ -45,6 +48,7 @@ function buildComponentRows(data: ListWorkersResponse): ComponentRow[] {
       type: 'processor' as const,
       name: processor.name,
       queueName: queue.name,
+      componentName: processorComponentOwner(data.processorComponents, processor.name, queue.name),
       observedJobs: processor.observedJobs,
     }))
   )
@@ -53,6 +57,7 @@ function buildComponentRows(data: ListWorkersResponse): ComponentRow[] {
     type: 'worker' as const,
     name: worker.name || worker.id,
     queueName: worker.queueName,
+    componentName: processorComponentOwner(data.processorComponents, worker.name, worker.queueName),
     address: worker.addr,
     age: worker.age,
     idle: worker.idle,
@@ -60,6 +65,8 @@ function buildComponentRows(data: ListWorkersResponse): ComponentRow[] {
   }))
 
   return [...processorRows, ...workerRows].sort((left, right) => {
+    const componentComparison = left.componentName.localeCompare(right.componentName)
+    if (componentComparison !== 0) return componentComparison
     const queueComparison = left.queueName.localeCompare(right.queueName)
     if (queueComparison !== 0) return queueComparison
     const typeComparison = left.type.localeCompare(right.type)
@@ -71,13 +78,26 @@ function buildComponentRows(data: ListWorkersResponse): ComponentRow[] {
 export function WorkerComponentsTable({ data }: { data: ListWorkersResponse }) {
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState<ComponentType | 'all'>('all')
+  const [componentFilter, setComponentFilter] = useState('all')
   const rows = useMemo(() => buildComponentRows(data), [data])
+  const componentLabels = useMemo(
+    () => new Map(data.processorComponents.map((component) => [component.name, component.label])),
+    [data.processorComponents]
+  )
+  const rowComponentNames = useMemo(
+    () => [...new Set(rows.map((row) => row.componentName))].sort(),
+    [rows]
+  )
   const normalizedSearch = search.trim().toLowerCase()
   const visibleRows = rows.filter((row) => {
     if (typeFilter !== 'all' && row.type !== typeFilter) return false
+    if (componentFilter !== 'all' && row.componentName !== componentFilter) return false
     if (!normalizedSearch) return true
     const runtime = row.type === 'worker' ? row.address : ''
-    return `${row.name} ${row.queueName} ${runtime}`.toLowerCase().includes(normalizedSearch)
+    const componentLabel = componentLabels.get(row.componentName) ?? row.componentName
+    return `${row.name} ${row.queueName} ${row.componentName} ${componentLabel} ${runtime}`
+      .toLowerCase()
+      .includes(normalizedSearch)
   })
   const processorCount = rows.filter((row) => row.type === 'processor').length
   const workerCount = rows.length - processorCount
@@ -94,7 +114,8 @@ export function WorkerComponentsTable({ data }: { data: ListWorkersResponse }) {
               <Boxes className="h-4 w-4 text-muted-foreground" />
               Component Overview
               <Badge variant="outline" className="font-mono font-normal tabular-nums">
-                {processorCount} processors · {workerCount} workers
+                {data.processorComponents.length} components · {processorCount} processors ·{' '}
+                {workerCount} workers
               </Badge>
               {processorObservationIncomplete ? (
                 <Badge variant="warning" className="font-normal">
@@ -103,7 +124,8 @@ export function WorkerComponentsTable({ data }: { data: ListWorkersResponse }) {
               ) : null}
             </CardTitle>
             <p className="mt-1 text-xs text-muted-foreground">
-              Observed processors and connected workers across {data.queues.length} loaded queues.
+              Workloads grouped by their deployed processor component across {data.queues.length}{' '}
+              loaded queues.
             </p>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
@@ -125,6 +147,20 @@ export function WorkerComponentsTable({ data }: { data: ListWorkersResponse }) {
               />
             </label>
             <Select
+              aria-label="Deployment component"
+              value={componentFilter}
+              onChange={(event) => setComponentFilter(event.target.value)}
+              className="h-8 min-w-48 text-xs"
+            >
+              <option value="all">All deployment components</option>
+              {rowComponentNames.map((componentName) => (
+                <option key={componentName} value={componentName}>
+                  {componentLabels.get(componentName) ??
+                    (componentName === UNASSIGNED_COMPONENT_NAME ? 'Unassigned' : componentName)}
+                </option>
+              ))}
+            </Select>
+            <Select
               aria-label="Component type"
               value={typeFilter}
               onChange={(event) => setTypeFilter(event.target.value as ComponentType | 'all')}
@@ -144,7 +180,8 @@ export function WorkerComponentsTable({ data }: { data: ListWorkersResponse }) {
               <TableRow className="hover:bg-transparent">
                 <TableHead>Type</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead>Component</TableHead>
+                <TableHead>Deployment component</TableHead>
+                <TableHead>Processor / worker</TableHead>
                 <TableHead>Queue</TableHead>
                 <TableHead>Activity evidence</TableHead>
                 <TableHead>Runtime</TableHead>
@@ -153,7 +190,7 @@ export function WorkerComponentsTable({ data }: { data: ListWorkersResponse }) {
             <TableBody>
               {visibleRows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-28 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={7} className="h-28 text-center text-sm text-muted-foreground">
                     {rows.length === 0
                       ? 'No processor or worker components were found.'
                       : 'No components match these filters.'}
@@ -199,6 +236,19 @@ export function WorkerComponentsTable({ data }: { data: ListWorkersResponse }) {
                           showPulse={false}
                         />
                       )}
+                    </TableCell>
+                    <TableCell>
+                      <div className="min-w-44">
+                        <div className="text-xs font-medium text-foreground">
+                          {componentLabels.get(row.componentName) ??
+                            (row.componentName === UNASSIGNED_COMPONENT_NAME
+                              ? 'Unassigned'
+                              : row.componentName)}
+                        </div>
+                        <code className="font-mono text-[10px] text-muted-foreground">
+                          {row.componentName}
+                        </code>
+                      </div>
                     </TableCell>
                     <TableCell>
                       <code className="font-mono text-xs font-medium text-foreground">

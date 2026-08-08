@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getConnectionRedisOptions } from '../lib/connection-options'
+import { getProcessorComponents } from '../lib/processor-components'
 import { observeQueueProcessors } from '../lib/queue-processors'
 import { discoverQueues, getQueue, safeGetWorkers } from '../lib/redis'
 
@@ -23,6 +24,7 @@ const app = new Hono()
       pageSizeStr ? parseInt(pageSizeStr, 10) : DEFAULT_PAGE_SIZE,
       MAX_PAGE_SIZE
     )
+    const processorComponents = getProcessorComponents()
 
     const allQueueNames = await discoverQueues(
       connectionId,
@@ -103,6 +105,7 @@ const app = new Hono()
     )
 
     return c.json({
+      processorComponents,
       workers: allWorkers,
       queues: queueData,
       totalWorkers: allWorkers.length,

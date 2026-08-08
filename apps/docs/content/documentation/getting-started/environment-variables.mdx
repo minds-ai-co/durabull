@@ -39,6 +39,7 @@ description: Complete runtime environment variable reference for local and produ
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DURABULL_ENV_CONNECTIONS` | No | Use env-driven connection set |
+| `DURABULL_PROCESSOR_COMPONENTS` | Optional | JSON array of deployment components with `name`, `label`, `description`, and assigned `processors`; enables component-aware worker topology |
 | `DURABULL_REDIS_URL_DEFAULT` | Recommended | Default env connection key |
 | `DURABULL_REDIS_URL_<NAME>` | When env mode enabled | Redis URL for named connection |
 | `DURABULL_REDIS_URL_<NAME>_ENVIRONMENT` | Optional | `development`, `staging`, or `production` |

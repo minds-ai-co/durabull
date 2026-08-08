@@ -37,6 +37,10 @@ jq -e '
   (.workers[] | select(.name == "cloudflared") | .image.tag == "2026.7.2") and
   ([.services[].envs[] | select(.key == "DURABULL_REDIS_URL_PRODUCTION")] | length) == 1 and
   ([.services[].envs[] | select(.key == "DURABULL_REDIS_URL_STAGING")] | length) == 1 and
+  ((.services[] | select(.name == "durabull") | .envs[] | select(.key == "DURABULL_PROCESSOR_COMPONENTS") | .value | fromjson) as $components |
+    ($components | map(.name)) == ["processor-build-p1", "processor-build-p2", "processor-interactive", "processor-background"] and
+    ($components | map(.processors[]) | length) == 38 and
+    ($components | map(.processors[]) | unique | length) == 38) and
   ([.services[].envs[] | select(.key == "BETTER_AUTH_SECRET")] | length) == 0
 ' "$rendered" >/dev/null
 
