@@ -16,10 +16,11 @@ account. MCP uses its own bearer token in addition to Cloudflare Access.
 
 ## Deployment boundary
 
-The workflow in `.github/workflows/deploy-minds-internal.yml` is
-`workflow_dispatch` only. Merging this repository does not deploy the app.
-Deployment must be started manually by an authorized owner after the production
-environment secrets are present.
+The workflow in `.github/workflows/deploy-minds-internal.yml` deploys
+automatically when `main` changes the deployment files under `deploy/` or the
+workflow itself. Application-code-only changes do not redeploy the pinned
+upstream image. An authorized owner can also use `workflow_dispatch` for a
+manual redeployment.
 
 The Cloudflare Tunnel must be remotely configured with:
 

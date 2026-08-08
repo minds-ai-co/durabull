@@ -1,6 +1,12 @@
 name: Deploy Minds internal Durabull
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - deploy/digitalocean-app.template.json
+      - deploy/render-digitalocean-spec.sh
   workflow_dispatch:
 
 permissions:
