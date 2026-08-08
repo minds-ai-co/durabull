@@ -6,6 +6,7 @@ import {
   AlertCircle,
   ArrowLeft,
   BarChart3,
+  Boxes,
   Check,
   ChevronRight,
   Clock,
@@ -14,6 +15,7 @@ import {
   Gauge,
   Layers,
   LineChart,
+  List,
   Pause,
   Play,
   Plus,
@@ -28,6 +30,7 @@ import {
   Zap,
 } from 'lucide-react'
 import {
+  Fragment,
   type KeyboardEvent,
   type MouseEvent,
   useCallback,
@@ -42,6 +45,7 @@ import { AddJobDialog } from '@/components/add-job-dialog'
 import { useAppTopBar } from '@/components/app-top-bar'
 import { DeleteQueueDialog } from '@/components/delete-queue-dialog'
 import { JobRemoveButton } from '@/components/job-remove-button'
+import { ProcessorBadge, ProcessorGroupRow } from '@/components/processor-job-labels'
 import { PurgeQueueDialog } from '@/components/purge-queue-dialog'
 import { RetryQueueDialog } from '@/components/retry-queue-dialog'
 import { StatusIndicator } from '@/components/status-badge'
@@ -89,6 +93,7 @@ import {
   useResumeQueue,
   useRetryJobs,
 } from '@/hooks/use-queues'
+import { groupJobsByProcessor } from '@/lib/job-processor-groups'
 import { getScheduleExpression, getScheduleSummary } from '@/lib/scheduled-jobs'
 import { formatDate, formatNumber, getTimezoneAbbreviation } from '@/lib/utils'
 
@@ -99,6 +104,7 @@ const queueSearchSchema = z.object({
   jobId: z.string().catch(''),
   name: z.string().catch(''),
   data: z.string().catch(''),
+  jobView: z.enum(['processors', 'timeline']).catch('processors'),
   hideScheduled: z
     .union([z.literal(0), z.literal(1), z.literal('0'), z.literal('1')])
     .transform((value) => (value === 1 || value === '1' ? 1 : 0))
@@ -156,6 +162,7 @@ function QueueDetailPage() {
     jobId,
     name = '',
     data: dataSearch = '',
+    jobView,
     hideScheduled,
     page,
   } = Route.useSearch()
@@ -245,6 +252,7 @@ function QueueDetailPage() {
       hasClientSideJobFilter ? filteredVisibleJobs.slice(0, visibleJobCount) : filteredVisibleJobs,
     [filteredVisibleJobs, hasClientSideJobFilter, visibleJobCount]
   )
+  const processorGroups = useMemo(() => groupJobsByProcessor(visibleJobs), [visibleJobs])
   const hasMoreVisibleJobs = hasClientSideJobFilter
     ? visibleJobs.length < filteredVisibleJobs.length
     : hasMoreJobs
@@ -354,6 +362,7 @@ function QueueDetailPage() {
           jobId: normalizedJobId,
           name,
           data: dataSearch,
+          jobView,
           hideScheduled,
           page: 1,
         },
@@ -362,7 +371,7 @@ function QueueDetailPage() {
     }, 300)
 
     return () => clearTimeout(timer)
-  }, [jobIdInput, jobId, section, tab, status, name, dataSearch, hideScheduled, navigate])
+  }, [jobIdInput, jobId, section, tab, status, name, dataSearch, jobView, hideScheduled, navigate])
 
   useEffect(() => {
     const normalizedName = nameInput.trim()
@@ -381,6 +390,7 @@ function QueueDetailPage() {
           jobId,
           name: normalizedName,
           data: dataSearch,
+          jobView,
           hideScheduled,
           page: 1,
         },
@@ -389,7 +399,7 @@ function QueueDetailPage() {
     }, 300)
 
     return () => clearTimeout(timer)
-  }, [nameInput, name, section, tab, status, jobId, dataSearch, hideScheduled, navigate])
+  }, [nameInput, name, section, tab, status, jobId, dataSearch, jobView, hideScheduled, navigate])
 
   useEffect(() => {
     const normalizedData = dataInput.trim()
@@ -401,13 +411,23 @@ function QueueDetailPage() {
     const timer = setTimeout(() => {
       navigate({
         to: '.',
-        search: { section, tab, status, jobId, name, data: normalizedData, hideScheduled, page: 1 },
+        search: {
+          section,
+          tab,
+          status,
+          jobId,
+          name,
+          data: normalizedData,
+          jobView,
+          hideScheduled,
+          page: 1,
+        },
         replace: true,
       })
     }, 300)
 
     return () => clearTimeout(timer)
-  }, [dataInput, dataSearch, section, tab, status, jobId, name, hideScheduled, navigate])
+  }, [dataInput, dataSearch, section, tab, status, jobId, name, jobView, hideScheduled, navigate])
 
   useEffect(() => {
     const container = jobsScrollRef.current
@@ -473,6 +493,27 @@ function QueueDetailPage() {
       params: { orgSlug, connectionId, queueName },
     })
   }, [connectionId, navigate, orgSlug, queueName])
+
+  const handleJobViewChange = useCallback(
+    (nextView: typeof jobView) => {
+      navigate({
+        to: '.',
+        search: {
+          section,
+          tab,
+          status,
+          jobId,
+          name,
+          data: dataSearch,
+          jobView: nextView,
+          hideScheduled,
+          page: 1,
+        },
+        replace: true,
+      })
+    },
+    [dataSearch, hideScheduled, jobId, name, navigate, section, status, tab]
+  )
 
   const topBarConfig = useMemo(
     () => ({
@@ -703,6 +744,7 @@ function QueueDetailPage() {
               jobId,
               name,
               data: dataSearch,
+              jobView,
               hideScheduled,
               page,
             },
@@ -1452,6 +1494,7 @@ function QueueDetailPage() {
                 jobId,
                 name,
                 data: dataSearch,
+                jobView,
                 hideScheduled,
                 page,
               },
@@ -1461,8 +1504,8 @@ function QueueDetailPage() {
         >
           {/* Toolbar: filters on left, tab toggle on right */}
           {/* pt-1.5 keeps focus rings from being clipped by the Tabs' overflow-hidden */}
-          <div className="flex items-center justify-between gap-3 pt-1.5">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-3 pt-1.5 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
               {tab === 'jobs' && (
                 <>
                   <Select
@@ -1482,6 +1525,7 @@ function QueueDetailPage() {
                           jobId,
                           name,
                           data: dataSearch,
+                          jobView,
                           hideScheduled,
                           page: 1,
                         },
@@ -1507,9 +1551,9 @@ function QueueDetailPage() {
                   <Input
                     value={nameInput}
                     onChange={(e) => setNameInput(e.target.value)}
-                    placeholder="Search by job name"
+                    placeholder="Search by processor"
                     className="w-48 max-w-full"
-                    aria-label="Search jobs by name"
+                    aria-label="Search jobs by processor"
                   />
                   <Input
                     value={dataInput}
@@ -1532,6 +1576,7 @@ function QueueDetailPage() {
                             jobId,
                             name,
                             data: dataSearch,
+                            jobView,
                             hideScheduled: e.target.checked ? 1 : 0,
                             page: 1,
                           },
@@ -1545,12 +1590,41 @@ function QueueDetailPage() {
                 </>
               )}
             </div>
-            <TabsList className="shrink-0">
-              <TabsTrigger value="jobs">Jobs</TabsTrigger>
-              <TabsTrigger value="scheduled">
-                Scheduled Jobs ({scheduledJobs?.total ?? 0})
-              </TabsTrigger>
-            </TabsList>
+            <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+              {tab === 'jobs' && (
+                <fieldset className="inline-flex h-9 items-center rounded-md border bg-muted p-0.5">
+                  <legend className="sr-only">Jobs view</legend>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant={jobView === 'processors' ? 'secondary' : 'ghost'}
+                    className="h-8 gap-1.5 px-2.5"
+                    aria-pressed={jobView === 'processors'}
+                    onClick={() => handleJobViewChange('processors')}
+                  >
+                    <Boxes className="h-3.5 w-3.5" />
+                    By processor
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant={jobView === 'timeline' ? 'secondary' : 'ghost'}
+                    className="h-8 gap-1.5 px-2.5"
+                    aria-pressed={jobView === 'timeline'}
+                    onClick={() => handleJobViewChange('timeline')}
+                  >
+                    <List className="h-3.5 w-3.5" />
+                    Timeline
+                  </Button>
+                </fieldset>
+              )}
+              <TabsList className="shrink-0">
+                <TabsTrigger value="jobs">Jobs</TabsTrigger>
+                <TabsTrigger value="scheduled">
+                  Scheduled Jobs ({scheduledJobs?.total ?? 0})
+                </TabsTrigger>
+              </TabsList>
+            </div>
           </div>
 
           <TabsContent
@@ -1599,10 +1673,23 @@ function QueueDetailPage() {
             {/* Jobs table */}
             <Card className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <CardHeader className="border-b bg-muted/30 py-3">
-                <CardTitle className="text-base font-medium flex items-center gap-2">
-                  <Layers className="h-4 w-4 text-muted-foreground" />
-                  Jobs
-                </CardTitle>
+                <div className="flex items-center justify-between gap-3">
+                  <CardTitle className="flex items-center gap-2 text-base font-medium">
+                    {jobView === 'processors' ? (
+                      <Boxes className="h-4 w-4 text-muted-foreground" />
+                    ) : (
+                      <List className="h-4 w-4 text-muted-foreground" />
+                    )}
+                    {jobView === 'processors' ? 'Jobs by processor' : 'Job timeline'}
+                  </CardTitle>
+                  {jobView === 'processors' && visibleJobs.length > 0 ? (
+                    <Badge variant="outline" className="font-normal text-muted-foreground">
+                      {processorGroups.length} processor{processorGroups.length === 1 ? '' : 's'}
+                      {' · '}
+                      {visibleJobs.length} loaded
+                    </Badge>
+                  ) : null}
+                </div>
               </CardHeader>
               <div ref={jobsScrollRef} className="min-h-0 flex-1 overflow-auto">
                 <table className="w-full caption-bottom border-separate border-spacing-0 text-sm">
@@ -1623,7 +1710,7 @@ function QueueDetailPage() {
                         ID
                       </TableHead>
                       <TableHead className="sticky top-0 z-20 bg-card shadow-[inset_0_-1px_0_0_hsl(var(--border)),0_8px_12px_-10px_rgba(0,0,0,0.75)]">
-                        Name
+                        Processor
                       </TableHead>
                       <TableHead className="sticky top-0 z-20 bg-card shadow-[inset_0_-1px_0_0_hsl(var(--border)),0_8px_12px_-10px_rgba(0,0,0,0.75)]">
                         Status
@@ -1658,6 +1745,26 @@ function QueueDetailPage() {
                           </p>
                         </TableCell>
                       </TableRow>
+                    ) : jobView === 'processors' ? (
+                      processorGroups.map((processor) => (
+                        <Fragment key={processor.name}>
+                          <ProcessorGroupRow
+                            name={processor.name}
+                            loadedCount={processor.jobs.length}
+                          />
+                          {processor.jobs.map((job) => (
+                            <JobRow
+                              key={job.id}
+                              job={job}
+                              orgSlug={orgSlug}
+                              connectionId={connectionId}
+                              queueName={queueName}
+                              selected={selectedJobs.has(job.id)}
+                              onToggleSelect={() => toggleJobSelection(job.id)}
+                            />
+                          ))}
+                        </Fragment>
+                      ))
                     ) : (
                       visibleJobs.map((job) => (
                         <JobRow
@@ -2201,7 +2308,9 @@ function JobRow({
           )}
         </Link>
       </TableCell>
-      <TableCell className="text-sm">{job.name}</TableCell>
+      <TableCell>
+        <ProcessorBadge name={job.name} />
+      </TableCell>
       <TableCell>
         <StatusIndicator status={status} />
       </TableCell>
