@@ -316,16 +316,18 @@ export function TeamSettingsPage() {
       </Card>
 
       {/* Invite Dialog */}
-      <InviteDialog
-        open={inviteDialogOpen}
-        onOpenChange={(open) => {
-          trackEvent(open ? AnalyticsEvents.DIALOG_OPENED : AnalyticsEvents.DIALOG_CLOSED, {
-            [AnalyticsProperties.DIALOG_TYPE]: DialogType.INVITE_MEMBER,
-          })
-          setInviteDialogOpen(open)
-        }}
-        organizationId={activeOrg?.id ?? ''}
-      />
+      {inviteDialogOpen && (
+        <InviteDialog
+          open
+          onOpenChange={(open) => {
+            trackEvent(open ? AnalyticsEvents.DIALOG_OPENED : AnalyticsEvents.DIALOG_CLOSED, {
+              [AnalyticsProperties.DIALOG_TYPE]: DialogType.INVITE_MEMBER,
+            })
+            setInviteDialogOpen(open)
+          }}
+          organizationId={activeOrg?.id ?? ''}
+        />
+      )}
 
       {/* Remove Member Dialog */}
       <RemoveMemberDialog
@@ -627,15 +629,6 @@ function InviteDialog({
 
   const inviteMutation = useInviteMember()
   const isLoading = inviteMutation.isPending
-
-  useEffect(() => {
-    if (!open) {
-      setEmail('')
-      setRole(MEMBER_ROLES.MEMBER)
-      inviteMutation.reset()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only reset when dialog closes
-  }, [open, inviteMutation.reset])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

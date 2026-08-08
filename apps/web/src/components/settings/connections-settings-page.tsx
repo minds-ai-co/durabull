@@ -1,6 +1,6 @@
-import { useNavigate, useParams } from '@tanstack/react-router'
 import { trackEvent } from '@durabull/analytics/browser'
 import { AnalyticsEvents } from '@durabull/analytics/events'
+import { useNavigate, useParams } from '@tanstack/react-router'
 import {
   AlertCircle,
   Check,
@@ -212,7 +212,7 @@ export function ConnectionsSettingsPage({
   const currentMembership = members?.find((m) => m.userId === user?.id)
   const canViewSecrets =
     isAuthless || currentMembership?.role === 'owner' || currentMembership?.role === 'admin'
-  const [createDialogOpen, setCreateDialogOpen] = useState(false)
+  const [createDialogOpen, setCreateDialogOpen] = useState(createFromSearch && !envConnections)
   const [editingConnection, setEditingConnection] = useState<RedisConnection | null>(null)
   const [deletingConnection, setDeletingConnection] = useState<RedisConnection | null>(null)
   const topBarConfig = useMemo(
@@ -254,11 +254,6 @@ export function ConnectionsSettingsPage({
   useEffect(() => {
     trackEvent(AnalyticsEvents.CONNECTIONS_VIEWED)
   }, [])
-
-  useEffect(() => {
-    if (!createFromSearch || envConnections) return
-    setCreateDialogOpen(true)
-  }, [createFromSearch, envConnections])
 
   if (error) {
     return (
@@ -366,25 +361,28 @@ export function ConnectionsSettingsPage({
       {!envConnections && (
         <>
           {/* Create Dialog */}
-          <ConnectionFormDialog
-            open={createDialogOpen}
-            onOpenChange={setCreateDialogOpen}
-            mode="create"
-          />
+          {createDialogOpen && (
+            <ConnectionFormDialog open onOpenChange={setCreateDialogOpen} mode="create" />
+          )}
 
           {/* Edit Dialog */}
-          <ConnectionFormDialog
-            open={!!editingConnection}
-            onOpenChange={(open) => !open && setEditingConnection(null)}
-            mode="edit"
-            connectionId={editingConnection?.id}
-          />
+          {editingConnection && (
+            <ConnectionFormDialog
+              key={editingConnection.id}
+              open
+              onOpenChange={(open) => !open && setEditingConnection(null)}
+              mode="edit"
+              connectionId={editingConnection.id}
+            />
+          )}
 
-          <DeleteConnectionDialog
-            connection={deletingConnection}
-            open={!!deletingConnection}
-            onOpenChange={(open) => !open && setDeletingConnection(null)}
-          />
+          {deletingConnection && (
+            <DeleteConnectionDialog
+              connection={deletingConnection}
+              open
+              onOpenChange={(open) => !open && setDeletingConnection(null)}
+            />
+          )}
         </>
       )}
     </div>
@@ -565,21 +563,58 @@ function ConnectionFormDialog({
   mode: 'create' | 'edit'
   connectionId?: string
 }) {
-  const navigate = useNavigate()
-  const { orgSlug } = useParams({ strict: false }) as { orgSlug?: string }
-  const [name, setName] = useState('')
-  const [url, setUrl] = useState('')
-  const [prefix, setPrefix] = useState('bull')
-  const [showUrl, setShowUrl] = useState(false)
-  const [environment, setEnvironment] = useState<ConnectionEnvironment>('development')
-  const [isDefault, setIsDefault] = useState(false)
-  const [allowSelfSignedCerts, setAllowSelfSignedCerts] = useState(false)
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
-  const [discoveryConnectionId, setDiscoveryConnectionId] = useState<string | null>(null)
-
   const { data: existingConnection, isLoading: loadingConnection } = useConnectionDetail(
     mode === 'edit' && open ? (connectionId ?? null) : null
   )
+
+  return (
+    <ConnectionFormDialogFields
+      key={
+        mode === 'edit' ? `${connectionId}:${existingConnection ? 'loaded' : 'loading'}` : 'create'
+      }
+      open={open}
+      onOpenChange={onOpenChange}
+      mode={mode}
+      connectionId={connectionId}
+      existingConnection={existingConnection}
+      loadingConnection={loadingConnection}
+    />
+  )
+}
+
+type ConnectionDetail = NonNullable<ReturnType<typeof useConnectionDetail>['data']>
+
+function ConnectionFormDialogFields({
+  open,
+  onOpenChange,
+  mode,
+  connectionId,
+  existingConnection,
+  loadingConnection,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  mode: 'create' | 'edit'
+  connectionId?: string
+  existingConnection?: ConnectionDetail
+  loadingConnection: boolean
+}) {
+  const navigate = useNavigate()
+  const { orgSlug } = useParams({ strict: false }) as { orgSlug?: string }
+  const [name, setName] = useState(existingConnection?.name ?? '')
+  const [url, setUrl] = useState(existingConnection?.url ?? '')
+  const [prefix, setPrefix] = useState(existingConnection?.prefix ?? 'bull')
+  const [showUrl, setShowUrl] = useState(false)
+  const [environment, setEnvironment] = useState<ConnectionEnvironment>(
+    existingConnection?.environment ?? 'development'
+  )
+  const [isDefault, setIsDefault] = useState(existingConnection?.isDefault ?? false)
+  const [allowSelfSignedCerts, setAllowSelfSignedCerts] = useState(
+    existingConnection?.allowSelfSignedCerts ?? false
+  )
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
+  const [discoveryConnectionId, setDiscoveryConnectionId] = useState<string | null>(null)
+
   const createMutation = useCreateConnection()
   const updateMutation = useUpdateConnection()
   const testMutation = useTestConnection()
@@ -598,26 +633,6 @@ function ConnectionFormDialog({
       queueDiscoveryQuery.isPending ||
       queueDiscoveryQuery.data?.running === true)
   const discoveryResult = queueDiscoveryQuery.data
-
-  useEffect(() => {
-    if (mode === 'edit' && existingConnection) {
-      setName(existingConnection.name)
-      setUrl(existingConnection.url ?? '')
-      setPrefix(existingConnection.prefix ?? 'bull')
-      setEnvironment(existingConnection.environment ?? 'development')
-      setIsDefault(existingConnection.isDefault)
-      setAllowSelfSignedCerts(existingConnection.allowSelfSignedCerts ?? false)
-    } else if (mode === 'create' && open) {
-      setName('')
-      setUrl('')
-      setPrefix('bull')
-      setEnvironment('development')
-      setIsDefault(false)
-      setAllowSelfSignedCerts(false)
-      setDiscoveryConnectionId(null)
-    }
-    setTestResult(null)
-  }, [mode, existingConnection, open])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1004,12 +1019,6 @@ function DeleteConnectionDialog({
 
   const isConfirmed = connection && confirmName === connection.name
   const isDeleting = deleteMutation.isPending
-
-  useEffect(() => {
-    if (!open) {
-      setConfirmName('')
-    }
-  }, [open])
 
   const handleDelete = async () => {
     if (!connection || !isConfirmed) return

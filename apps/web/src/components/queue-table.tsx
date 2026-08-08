@@ -209,15 +209,6 @@ export function QueueTable({
   const hasServerFilters = search !== '' || statusFilter !== ''
 
   useEffect(() => {
-    setHideEmpty(false)
-  }, [page])
-
-  // Keep the input in sync when search is changed externally (e.g. URL navigation)
-  useEffect(() => {
-    setSearchInput(search)
-  }, [search])
-
-  useEffect(() => {
     return () => clearTimeout(searchDebounceRef.current)
   }, [])
 

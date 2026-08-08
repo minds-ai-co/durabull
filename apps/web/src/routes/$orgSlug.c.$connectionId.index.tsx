@@ -389,6 +389,7 @@ function Dashboard() {
             <EmptyState />
           ) : (
             <QueueTable
+              key={`${data?.page ?? 1}:${q}`}
               queues={queues}
               page={data?.page ?? 1}
               totalPages={data?.totalPages ?? 1}

@@ -18,5 +18,10 @@ export const Route = createFileRoute('/$orgSlug/settings/connections')({
 function SettingsConnectionsRoute() {
   const { create } = Route.useSearch()
 
-  return <ConnectionsSettingsPage createFromSearch={Boolean(create)} />
+  return (
+    <ConnectionsSettingsPage
+      key={create ? 'create-connection' : 'connections'}
+      createFromSearch={Boolean(create)}
+    />
+  )
 }
