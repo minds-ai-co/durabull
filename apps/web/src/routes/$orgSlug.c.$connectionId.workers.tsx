@@ -13,7 +13,7 @@ import {
   useEdgesState,
   useNodesState,
 } from '@xyflow/react'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import '@xyflow/react/dist/style.css'
 
 // Worker type - matches API response
@@ -29,6 +29,7 @@ interface WorkerWithQueue {
 import {
   Activity,
   AlertCircle,
+  Boxes,
   Clock,
   Cpu,
   Database,
@@ -41,10 +42,12 @@ import {
 } from 'lucide-react'
 import { useAppTopBar } from '@/components/app-top-bar'
 import { useConnection } from '@/components/connection-provider'
+import { ProcessorTopologyNode } from '@/components/processor-topology-node'
 import { QueueNameTag } from '@/components/queue-name-tag'
 import { StatusIndicator } from '@/components/status-badge'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table,
@@ -109,6 +112,7 @@ function QueueNode({ data }: NodeProps) {
   const workerCount = data.workerCount as number
   const hasWorkers = workerCount > 0
   const queueName = data.label as string
+  const processorCount = data.processorCount as number
 
   return (
     <div className="relative">
@@ -157,10 +161,14 @@ function QueueNode({ data }: NodeProps) {
                   </div>
                 </div>
               </div>
-              <div className="mt-3 pt-3 border-t border-border/50 grid grid-cols-2 gap-2 text-xs">
+              <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border/50 pt-3 text-xs">
                 <div className="flex items-center gap-1.5 text-muted-foreground">
                   <Users className="h-3 w-3" />
                   <span>{workerCount} workers</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-muted-foreground">
+                  <Boxes className="h-3 w-3" />
+                  <span>{processorCount} processors</span>
                 </div>
                 <div className="flex items-center gap-1.5 text-muted-foreground">
                   <Activity className="h-3 w-3" />
@@ -256,12 +264,14 @@ function WorkerNode({ data }: NodeProps) {
 const nodeTypes = {
   redis: RedisNode,
   queue: QueueNode,
+  processor: ProcessorTopologyNode,
   worker: WorkerNode,
 }
 
 function WorkersPage() {
   const { data, isLoading, error } = useAllWorkers()
   const { currentConnection } = useConnection()
+  const [topologyQueue, setTopologyQueue] = useState('')
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const topBarConfig = useMemo(
@@ -273,7 +283,7 @@ function WorkersPage() {
           </span>
           <h1 className="truncate text-base font-semibold md:text-lg">Workers</h1>
           <span className="hidden text-sm text-muted-foreground xl:inline">
-            Visualize connected workers and queue assignments
+            Visualize queues, observed processors, and connected workers
           </span>
         </div>
       ),
@@ -290,31 +300,45 @@ function WorkersPage() {
     const newNodes: Node[] = []
     const newEdges: Edge[] = []
 
-    // Redis node (center)
-    const redisNode: Node = {
+    // Sort queues alphabetically to ensure stable ordering
+    const sortedQueues = data.queues
+      .filter((queue) => !topologyQueue || queue.name === topologyQueue)
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    type Worker = ListWorkersResponse['workers'][number]
+    const queueLayouts = sortedQueues.map((queue) => {
+      const workers = data.workers
+        .filter((worker: Worker) => worker.queueName === queue.name)
+        .sort((left: Worker, right: Worker) => left.id.localeCompare(right.id))
+      const childCount = queue.processorObservation.processors.length + workers.length
+      return {
+        queue,
+        workers,
+        height: Math.max(200, Math.max(1, childCount) * 100),
+      }
+    })
+    const totalGraphHeight =
+      queueLayouts.reduce((total, layout) => total + layout.height, 0) +
+      Math.max(0, queueLayouts.length - 1) * 80
+    let nextQueueTop = 0
+
+    // Redis node anchors the center of the full queue/component map.
+    newNodes.push({
       id: 'redis',
       type: 'redis',
-      position: { x: 0, y: 300 },
+      position: { x: 0, y: Math.max(0, totalGraphHeight / 2 - 60) },
       data: {
         label: currentConnection?.name ?? 'Redis',
-        totalQueues: data.totalQueues,
+        totalQueues: topologyQueue ? sortedQueues.length : data.totalQueues,
         totalWorkers: data.totalWorkers,
       },
-    }
-    newNodes.push(redisNode)
+    })
 
-    // Sort queues alphabetically to ensure stable ordering
-    const sortedQueues = [...data.queues].sort((a, b) => a.name.localeCompare(b.name))
-
-    // Calculate layout
-    const queueCount = sortedQueues.length
-    const queueSpacing = 200
-    const queueStartY = 300 - ((queueCount - 1) * queueSpacing) / 2
-
-    // Queue nodes and their workers
-    sortedQueues.forEach((queue, queueIndex) => {
+    // Queue nodes fan out to observed processors and connected workers as peer components.
+    queueLayouts.forEach(({ queue, workers: queueWorkers, height }) => {
       const queueId = `queue-${queue.name}`
-      const queueY = queueStartY + queueIndex * queueSpacing
+      const queueY = nextQueueTop + height / 2 - 60
+      nextQueueTop += height + 80
 
       // Queue node
       const queueNode: Node = {
@@ -325,6 +349,7 @@ function WorkersPage() {
           label: queue.name,
           status: queue.status,
           workerCount: queue.workerCount,
+          processorCount: queue.processorObservation.processors.length,
           activeJobs: queue.jobCounts.active,
           waitingJobs: queue.jobCounts.waiting,
         },
@@ -348,22 +373,48 @@ function WorkersPage() {
         },
       })
 
-      // Worker nodes for this queue - sort by ID for stable ordering
-      type Worker = ListWorkersResponse['workers'][number]
-      const queueWorkers = data.workers
-        .filter((w: Worker) => w.queueName === queue.name)
-        .sort((a: Worker, b: Worker) => a.id.localeCompare(b.id))
-      const workerSpacing = 100
-      const workerStartY = queueY - ((queueWorkers.length - 1) * workerSpacing) / 2
+      const topologyChildren = [
+        ...queue.processorObservation.processors.map((processor) => ({
+          kind: 'processor' as const,
+          processor,
+        })),
+        ...queueWorkers.map((worker: Worker) => ({ kind: 'worker' as const, worker })),
+      ]
+      const childStartY = queueY - ((topologyChildren.length - 1) * 100) / 2
 
-      queueWorkers.forEach((worker: Worker, workerIndex: number) => {
+      topologyChildren.forEach((child, childIndex) => {
+        const childY = childStartY + childIndex * 100
+
+        if (child.kind === 'processor') {
+          const processorId = `processor-${queue.name}-${child.processor.name}`
+          newNodes.push({
+            id: processorId,
+            type: 'processor',
+            position: { x: 720, y: childY },
+            data: {
+              label: child.processor.name,
+              observedJobs: child.processor.observedJobs,
+              queueName: queue.name,
+            },
+          })
+          newEdges.push({
+            id: `${queueId}-${processorId}`,
+            source: queueId,
+            target: processorId,
+            type: 'smoothstep',
+            style: { stroke: 'var(--color-primary)', strokeWidth: 1.5 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-primary)' },
+          })
+          return
+        }
+
+        const worker = child.worker
         const workerId = `worker-${worker.id}`
-        const workerY = workerStartY + workerIndex * workerSpacing
 
         const workerNode: Node = {
           id: workerId,
           type: 'worker',
-          position: { x: 720, y: workerY },
+          position: { x: 720, y: childY },
           data: {
             label: worker.name || worker.id,
             worker,
@@ -393,7 +444,7 @@ function WorkersPage() {
 
     setNodes(newNodes)
     setEdges(newEdges)
-  }, [data, currentConnection, setNodes, setEdges])
+  }, [data, currentConnection, topologyQueue, setNodes, setEdges])
 
   useEffect(() => {
     buildGraph()
@@ -410,8 +461,15 @@ function WorkersPage() {
       active: activeWorkers,
       idle: idleWorkers,
       queues: data.totalQueues,
+      processors: data.queues.reduce(
+        (total, queue) => total + queue.processorObservation.processors.length,
+        0
+      ),
     }
   }, [data])
+  const processorObservationIncomplete = data?.queues.some(
+    (queue) => !queue.processorObservation.available || queue.processorObservation.truncated
+  )
 
   if (error) {
     return (
@@ -428,7 +486,7 @@ function WorkersPage() {
   return (
     <div className="space-y-6">
       {/* Stats */}
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <StatCard
           title="Total Workers"
           value={stats?.total ?? 0}
@@ -457,32 +515,66 @@ function WorkersPage() {
           loading={isLoading}
           variant="blue"
         />
+        <StatCard
+          title="Observed processors"
+          value={stats?.processors ?? 0}
+          icon={Boxes}
+          loading={isLoading}
+          variant="blue"
+        />
       </div>
 
       {/* React Flow Visualization */}
       <Card className="overflow-hidden">
         <CardHeader className="border-b bg-muted/30 py-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <CardTitle className="text-base font-medium flex items-center gap-2">
               <Network className="h-4 w-4 text-muted-foreground" />
-              Worker Topology
+              Queue Topology
+              {processorObservationIncomplete ? (
+                <Badge variant="warning" className="font-normal">
+                  Processor sample incomplete
+                </Badge>
+              ) : null}
             </CardTitle>
-            <div className="flex items-center gap-4 text-xs text-muted-foreground">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-status-danger" />
-                Redis
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-status-active" />
-                Queue
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-status-success" />
-                Worker
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="w-4 h-0.5 bg-gradient-to-r from-status-success to-status-success animate-pulse" />
-                Active
+            <div className="flex flex-wrap items-center justify-end gap-4">
+              <Select
+                aria-label="Topology queue"
+                className="h-8 min-w-48 text-xs"
+                value={topologyQueue}
+                onChange={(event) => setTopologyQueue(event.target.value)}
+              >
+                <option value="">All queues</option>
+                {data?.queues
+                  .slice()
+                  .sort((left, right) => left.name.localeCompare(right.name))
+                  .map((queue) => (
+                    <option key={queue.name} value={queue.name}>
+                      {queue.name}
+                    </option>
+                  ))}
+              </Select>
+              <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-status-danger" />
+                  Redis
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-status-active" />
+                  Queue
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-primary" />
+                  Processor
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-status-success" />
+                  Worker
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-4 h-0.5 bg-gradient-to-r from-status-success to-status-success animate-pulse" />
+                  Active
+                </div>
               </div>
             </div>
           </div>
@@ -495,18 +587,18 @@ function WorkersPage() {
                   <div className="w-16 h-16 border-4 border-muted rounded-full" />
                   <div className="absolute inset-0 w-16 h-16 border-4 border-primary border-t-transparent rounded-full animate-spin" />
                 </div>
-                <p className="text-muted-foreground">Loading worker topology...</p>
+                <p className="text-muted-foreground">Loading queue topology...</p>
               </div>
             </div>
-          ) : data?.totalWorkers === 0 ? (
+          ) : data?.totalQueues === 0 ? (
             <div className="flex flex-col items-center justify-center h-full">
               <div className="rounded-full bg-muted p-6 mb-4">
                 <WifiOff className="h-10 w-10 text-muted-foreground" />
               </div>
-              <h3 className="text-lg font-semibold mb-1">No Workers Connected</h3>
+              <h3 className="text-lg font-semibold mb-1">No queues discovered</h3>
               <p className="text-sm text-muted-foreground text-center max-w-md">
-                No workers are currently connected to any queue. Start some workers to see them
-                appear here.
+                Queue, processor, and worker components will appear after Durabull discovers a
+                BullMQ queue.
               </p>
             </div>
           ) : (
@@ -517,6 +609,7 @@ function WorkersPage() {
               onEdgesChange={onEdgesChange}
               nodeTypes={nodeTypes}
               fitView
+              key={topologyQueue || 'all-queues'}
               fitViewOptions={{ padding: 0.2 }}
               minZoom={0.3}
               maxZoom={1.5}
@@ -535,6 +628,7 @@ function WorkersPage() {
                 nodeColor={(node) => {
                   if (node.type === 'redis') return '#ef4444'
                   if (node.type === 'queue') return '#3b82f6'
+                  if (node.type === 'processor') return 'var(--color-primary)'
                   return '#22c55e'
                 }}
                 maskColor="rgba(0, 0, 0, 0.2)"

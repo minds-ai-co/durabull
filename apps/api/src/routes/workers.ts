@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
-import { discoverQueues, getQueue, safeGetWorkers } from '../lib/redis'
 import { getConnectionRedisOptions } from '../lib/connection-options'
+import { observeQueueProcessors } from '../lib/queue-processors'
+import { discoverQueues, getQueue, safeGetWorkers } from '../lib/redis'
 
 // Default and max page sizes for pagination
 const DEFAULT_PAGE_SIZE = 50
@@ -49,6 +50,7 @@ const app = new Hono()
       workerCount: number
       status: 'active' | 'paused'
       jobCounts: { active: number; waiting: number }
+      processorObservation: Awaited<ReturnType<typeof observeQueueProcessors>>
     }> = []
 
     await Promise.all(
@@ -65,6 +67,15 @@ const app = new Hono()
           queue.isPaused(),
           queue.getJobCounts(),
         ])
+        const totalJobs =
+          (counts.waiting ?? 0) +
+          (counts.active ?? 0) +
+          (counts.completed ?? 0) +
+          (counts.failed ?? 0) +
+          (counts.delayed ?? 0) +
+          (counts.paused ?? 0) +
+          (counts.prioritized ?? 0)
+        const processorObservation = await observeQueueProcessors(queue, totalJobs)
 
         // Add workers with queue context
         for (const w of workers) {
@@ -86,6 +97,7 @@ const app = new Hono()
             active: counts.active ?? 0,
             waiting: counts.waiting ?? 0,
           },
+          processorObservation,
         })
       })
     )

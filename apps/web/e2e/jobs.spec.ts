@@ -204,6 +204,15 @@ test.describe('Jobs', () => {
       for (const jobId of createdJobs) {
         await expect(page.getByTestId(`job-row-${jobId}`)).toBeVisible()
       }
+
+      await page.goto(`/${TEST_ORG_SLUG}/c/${connectionId}/workers`)
+      await expect(page.getByRole('heading', { name: /Queue Topology/ })).toBeVisible({
+        timeout: 15000,
+      })
+      await page.getByLabel('Topology queue').selectOption(queueName)
+      for (const name of processorNames) {
+        await expect(page.getByTestId(`topology-processor-${name}`)).toBeVisible({ timeout: 15000 })
+      }
     } finally {
       await safeRemoveJobs(page, { connectionId, queueName, jobIds: createdJobs })
     }
