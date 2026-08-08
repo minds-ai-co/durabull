@@ -17,6 +17,9 @@ concurrency:
   group: deploy-minds-internal-durabull
   cancel-in-progress: false
 
+env:
+  PRODUCTION_VALKEY_CLUSTER_ID: 1a8db10a-cad7-4eb3-8073-c046e98e5a7f
+
 jobs:
   deploy:
     name: Deploy standalone internal app
@@ -91,6 +94,30 @@ jobs:
             --spec deploy/digitalocean-app.rendered.json \
             --format ID,Spec.Name,ActiveDeployment.ID
 
+      - name: Reconcile production Valkey trusted source
+        run: |
+          set -euo pipefail
+
+          app_id=$(doctl apps list --output json \
+            | jq -er '.[] | select(.spec.name == "minds-durabull-internal") | .id')
+          is_trusted=$(doctl databases firewalls list \
+            "$PRODUCTION_VALKEY_CLUSTER_ID" \
+            --output json \
+            | jq -r --arg app_id "$app_id" \
+              'any(.[]; .type == "app" and .value == $app_id)')
+
+          if [ "$is_trusted" != "true" ]; then
+            doctl databases firewalls append \
+              "$PRODUCTION_VALKEY_CLUSTER_ID" \
+              --rule "app:$app_id"
+          fi
+
+          doctl databases firewalls list \
+            "$PRODUCTION_VALKEY_CLUSTER_ID" \
+            --output json \
+            | jq -e --arg app_id "$app_id" \
+              'any(.[]; .type == "app" and .value == $app_id)' >/dev/null
+
       - name: Verify protected live deployment
         env:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
@@ -157,14 +184,58 @@ jobs:
                 .session.activeOrganizationId == "authless-org"
               ' >/dev/null
 
+          connections_body="$RUNNER_TEMP/durabull-connections.json"
           curl -fsS \
             --max-time 20 \
             "${access_headers[@]}" \
             "$base_url/api/connections" \
-            | jq -e '
+            > "$connections_body"
+          jq -e '
                 ([.connections[].name] | sort) == ["Production", "Staging"] and
                 ([.connections[] | select(.name == "Production" and .isDefault == true)] | length) == 1
-              ' >/dev/null
+              ' "$connections_body" >/dev/null
+
+          for connection_name in Production Staging; do
+            connection_id=$(jq -er \
+              --arg name "$connection_name" \
+              '.connections[] | select(.name == $name) | .id' \
+              "$connections_body")
+            discovery_body="$RUNNER_TEMP/durabull-discovery-${connection_name}.json"
+            discovery_code=$(curl -sS \
+              --max-time 60 \
+              -o "$discovery_body" \
+              -w '%{http_code}' \
+              -X POST \
+              "${access_headers[@]}" \
+              "$base_url/api/c/$connection_id/queues/discovery?wait=true")
+            if [ "$discovery_code" != "200" ]; then
+              echo "::error::$connection_name Redis discovery returned HTTP $discovery_code"
+              jq -c '{error, message}' "$discovery_body" || true
+              exit 1
+            fi
+            jq -e '
+                .running == false and
+                .lastError == null and
+                .scannedPages >= 1 and
+                .indexed.total >= 1 and
+                .indexed.confirmed >= 1
+              ' "$discovery_body" >/dev/null
+
+            queues_body="$RUNNER_TEMP/durabull-queues-${connection_name}.json"
+            curl -fsS \
+              --max-time 30 \
+              "${access_headers[@]}" \
+              "$base_url/api/c/$connection_id/queues?page=1&pageSize=5" \
+              > "$queues_body"
+            jq -e '
+                .total >= 1 and
+                (.queues | length) >= 1 and
+                all(.queues[];
+                  (.name | type == "string" and length >= 1) and
+                  (.jobCounts | type == "object")
+                )
+              ' "$queues_body" >/dev/null
+          done
 
           curl -fsS \
             --max-time 20 \
@@ -205,7 +276,7 @@ jobs:
             exit 1
           fi
 
-          echo "Protected health, authless UI state, environment connections, and MCP initialize: ok"
+          echo "Protected health, authless UI state, Redis discovery, queue metrics, and MCP initialize: ok"
 
       - name: Record deployment boundary
         run: |
@@ -215,7 +286,7 @@ jobs:
             echo "- DigitalOcean app: \`minds-durabull-internal\`"
             echo "- Public DigitalOcean ingress: none"
             echo "- Origin path: Cloudflare Tunnel → \`http://durabull:3000\`"
-            echo "- Protected live health, authless state, Production/Staging connections, and MCP initialize: verified"
+            echo "- Protected health, authless state, Production/Staging Redis discovery, queue metrics, and MCP initialize: verified"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove rendered secret material
