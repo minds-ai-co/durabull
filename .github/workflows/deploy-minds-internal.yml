@@ -5,6 +5,7 @@ on:
     branches:
       - main
     paths:
+      - .github/workflows/deploy-minds-internal.yml
       - deploy/digitalocean-app.template.json
       - deploy/render-digitalocean-spec.sh
   workflow_dispatch:
@@ -29,6 +30,8 @@ jobs:
         env:
           DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           DURABULL_MCP_AUTHLESS_BEARER: ${{ secrets.DURABULL_MCP_AUTHLESS_BEARER }}
           DURABULL_REDIS_URL_ENCRYPTION_KEY: ${{ secrets.DURABULL_REDIS_URL_ENCRYPTION_KEY }}
           DURABULL_SECRET_ENCRYPTION_KEY: ${{ secrets.DURABULL_SECRET_ENCRYPTION_KEY }}
@@ -39,6 +42,8 @@ jobs:
           required=(
             DIGITALOCEAN_ACCESS_TOKEN
             CLOUDFLARE_TUNNEL_TOKEN
+            CF_ACCESS_CLIENT_ID
+            CF_ACCESS_CLIENT_SECRET
             DURABULL_MCP_AUTHLESS_BEARER
             DURABULL_REDIS_URL_ENCRYPTION_KEY
             DURABULL_SECRET_ENCRYPTION_KEY
@@ -86,6 +91,122 @@ jobs:
             --spec deploy/digitalocean-app.rendered.json \
             --format ID,Spec.Name,ActiveDeployment.ID
 
+      - name: Verify protected live deployment
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          DURABULL_MCP_AUTHLESS_BEARER: ${{ secrets.DURABULL_MCP_AUTHLESS_BEARER }}
+        run: |
+          set -euo pipefail
+
+          base_url=https://durabull.getminds.ai
+          access_headers=(
+            -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}"
+            -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}"
+          )
+          health_body="$RUNNER_TEMP/durabull-health.json"
+
+          access_boundary_code=$(curl -sS \
+            --max-time 20 \
+            -o /dev/null \
+            -w '%{http_code}' \
+            "$base_url/api/health")
+          if [ "$access_boundary_code" != "302" ]; then
+            echo "::error::Unauthenticated health returned HTTP $access_boundary_code; expected Cloudflare Access redirect"
+            exit 1
+          fi
+
+          healthy=false
+          for attempt in $(seq 1 12); do
+            health_code=$(curl -sS \
+              --max-time 20 \
+              -o "$health_body" \
+              -w '%{http_code}' \
+              "${access_headers[@]}" \
+              "$base_url/api/health" || true)
+            if [ "$health_code" = "200" ] && jq -e '.status == "ok"' "$health_body" >/dev/null; then
+              healthy=true
+              break
+            fi
+            echo "protected health attempt ${attempt}/12 returned HTTP ${health_code:-000}"
+            sleep 5
+          done
+          if [ "$healthy" != "true" ]; then
+            echo "::error::Protected Durabull health check did not become ready"
+            exit 1
+          fi
+
+          curl -fsS \
+            --max-time 20 \
+            "${access_headers[@]}" \
+            "$base_url/api/app/config" \
+            | jq -e '
+                .authless == true and
+                .envConnections == true and
+                .persistence == "pglite" and
+                .stateless == true and
+                .environment == "production"
+              ' >/dev/null
+
+          curl -fsS \
+            --max-time 20 \
+            "${access_headers[@]}" \
+            "$base_url/api/auth/get-session" \
+            | jq -e '
+                .user.id == "authless-user" and
+                .session.activeOrganizationId == "authless-org"
+              ' >/dev/null
+
+          curl -fsS \
+            --max-time 20 \
+            "${access_headers[@]}" \
+            "$base_url/api/connections" \
+            | jq -e '
+                ([.connections[].name] | sort) == ["Production", "Staging"] and
+                ([.connections[] | select(.name == "Production" and .isDefault == true)] | length) == 1
+              ' >/dev/null
+
+          curl -fsS \
+            --max-time 20 \
+            "${access_headers[@]}" \
+            "$base_url/" \
+            | grep -F '<title>Durabull - BullMQ Admin Dashboard</title>' >/dev/null
+
+          initialize_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"minds-deploy-e2e","version":"1.0.0"}}}'
+          mcp_without_bearer=$(curl -sS \
+            --max-time 20 \
+            -o /dev/null \
+            -w '%{http_code}' \
+            "${access_headers[@]}" \
+            -H "Origin: $base_url" \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'Content-Type: application/json' \
+            --data "$initialize_payload" \
+            "$base_url/mcp")
+          if [ "$mcp_without_bearer" != "401" ]; then
+            echo "::error::MCP without its bearer returned HTTP $mcp_without_bearer; expected 401"
+            exit 1
+          fi
+
+          mcp_body="$RUNNER_TEMP/durabull-mcp-initialize.txt"
+          mcp_code=$(curl -sS \
+            --max-time 20 \
+            -o "$mcp_body" \
+            -w '%{http_code}' \
+            "${access_headers[@]}" \
+            -H "Origin: $base_url" \
+            -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'Content-Type: application/json' \
+            --data "$initialize_payload" \
+            "$base_url/mcp")
+          if [ "$mcp_code" != "200" ] || ! grep -F '"serverInfo"' "$mcp_body" >/dev/null; then
+            echo "::error::Authenticated MCP initialize failed with HTTP $mcp_code"
+            exit 1
+          fi
+
+          echo "Protected health, authless UI state, environment connections, and MCP initialize: ok"
+
       - name: Record deployment boundary
         run: |
           {
@@ -94,7 +215,7 @@ jobs:
             echo "- DigitalOcean app: \`minds-durabull-internal\`"
             echo "- Public DigitalOcean ingress: none"
             echo "- Origin path: Cloudflare Tunnel → \`http://durabull:3000\`"
-            echo "- DNS cutover remains a separate owner-controlled Cloudflare action."
+            echo "- Protected live health, authless state, Production/Staging connections, and MCP initialize: verified"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove rendered secret material

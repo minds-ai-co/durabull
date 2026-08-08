@@ -19,8 +19,11 @@ account. MCP uses its own bearer token in addition to Cloudflare Access.
 The workflow in `.github/workflows/deploy-minds-internal.yml` deploys
 automatically when `main` changes the deployment files under `deploy/` or the
 workflow itself. Application-code-only changes do not redeploy the pinned
-upstream image. An authorized owner can also use `workflow_dispatch` for a
-manual redeployment.
+upstream image. After DigitalOcean activates the deployment, the workflow uses
+Cloudflare Access to verify protected health, authless mode, the Production and
+Staging connections, the dashboard HTML, rejection of MCP requests without the
+Durabull bearer, and a successful authenticated MCP initialization. An
+authorized owner can also use `workflow_dispatch` for a manual redeployment.
 
 The Cloudflare Tunnel must be remotely configured with:
 
@@ -36,6 +39,8 @@ from the webapp app specifications.
 
 - `DIGITALOCEAN_ACCESS_TOKEN`
 - `CLOUDFLARE_TUNNEL_TOKEN`
+- `CF_ACCESS_CLIENT_ID`
+- `CF_ACCESS_CLIENT_SECRET`
 - `DURABULL_MCP_AUTHLESS_BEARER`
 - `DURABULL_REDIS_URL_ENCRYPTION_KEY`
 - `DURABULL_SECRET_ENCRYPTION_KEY`
