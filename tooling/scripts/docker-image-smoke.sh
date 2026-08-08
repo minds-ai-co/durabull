@@ -72,6 +72,7 @@ echo "Starting smoke stack with image: $DURABULL_IMAGE"
 compose up -d
 
 wait_for_url "${APP_BASE_URL}/api/health"
+compose exec -T redis redis-cli HSET bull:smoke:meta opts.maxLenEvents 1000 >/dev/null
 
 assert_json_contains "${APP_BASE_URL}/api/health" '"status":"ok"'
 assert_json_contains "${APP_BASE_URL}/api/app/config" '"authless":true'
@@ -165,7 +166,36 @@ if ! jq -e '
   exit 1
 fi
 
-echo "Docker image health, build metadata, 13 MCP tool annotations, and MCP domain call passed."
+connection_id="$(jq -er '.result.content[0].text | fromjson | .connections[0].id' "$connections_json")"
+queues_body="$MCP_TMP_DIR/queues.body"
+queues_json="$MCP_TMP_DIR/queues.json"
+queues_payload="$(jq -cn \
+  --arg connection_id "$connection_id" \
+  '{jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"list_queues",arguments:{connectionId:$connection_id,pageSize:10}}}')"
+curl --silent --show-error --fail \
+  --output "$queues_body" \
+  --header "Authorization: Bearer ${MCP_AUTHLESS_BEARER_TOKEN}" \
+  --header "Origin: ${APP_BASE_URL}" \
+  --header "Mcp-Session-Id: ${mcp_session_id}" \
+  --header 'Accept: application/json, text/event-stream' \
+  --header 'Content-Type: application/json' \
+  --data "$queues_payload" \
+  "${APP_BASE_URL}/mcp"
+sed -n 's/^data: //p' "$queues_body" | tail -n 1 > "$queues_json"
+if ! jq -e '
+  .result.isError != true and
+  ((.result.content[0].text | fromjson) as $payload |
+    $payload.total == 1 and
+    ($payload.queues | length) == 1 and
+    $payload.queues[0].name == "smoke" and
+    ($payload.queues[0].jobCounts | type) == "object")
+' "$queues_json" >/dev/null; then
+  echo "MCP list_queues discovery assertion failed:" >&2
+  cat "$queues_body" >&2
+  exit 1
+fi
+
+echo "Docker image health, build metadata, 13 MCP tool annotations, and live MCP queue discovery passed."
 
 # Keep this after the MCP checks so the smoke proves a fresh MCP request can
 # bootstrap authless persistence without relying on an earlier web/API session.
