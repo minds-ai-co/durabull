@@ -44,20 +44,12 @@ import { useAppTopBar } from '@/components/app-top-bar'
 import { useConnection } from '@/components/connection-provider'
 import { ProcessorTopologyNode } from '@/components/processor-topology-node'
 import { QueueNameTag } from '@/components/queue-name-tag'
-import { StatusIndicator } from '@/components/status-badge'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { WorkerComponentsTable } from '@/components/worker-components-table'
 import { type ListWorkersResponse, useAllWorkers } from '@/hooks/use-queues'
 import { cn, formatDuration } from '@/lib/utils'
 
@@ -638,62 +630,7 @@ function WorkersPage() {
         </div>
       </Card>
 
-      {/* Worker Details Table */}
-      {data && data.workers.length > 0 && (
-        <Card>
-          <CardHeader className="border-b bg-muted/30 py-3">
-            <CardTitle className="text-base font-medium flex items-center gap-2">
-              <Server className="h-4 w-4 text-muted-foreground" />
-              Worker Details
-            </CardTitle>
-          </CardHeader>
-          <Table>
-            <TableHeader>
-              <TableRow className="hover:bg-transparent">
-                <TableHead>Status</TableHead>
-                <TableHead>Worker ID</TableHead>
-                <TableHead>Name</TableHead>
-                <TableHead>Queue</TableHead>
-                <TableHead>Address</TableHead>
-                <TableHead>Age</TableHead>
-                <TableHead>Idle Time</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data.workers.map((worker: ListWorkersResponse['workers'][number]) => {
-                const isActive = worker.idle <= 5000
-                return (
-                  <TableRow key={worker.id}>
-                    <TableCell>
-                      <StatusIndicator status={isActive ? 'active' : 'idle'} />
-                    </TableCell>
-                    <TableCell>
-                      <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">
-                        {worker.id}
-                      </code>
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {worker.name || <span className="text-muted-foreground">—</span>}
-                    </TableCell>
-                    <TableCell>
-                      <QueueNameTag name={worker.queueName} asLink size="sm" />
-                    </TableCell>
-                    <TableCell>
-                      <code className="text-xs text-muted-foreground font-mono">{worker.addr}</code>
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {formatDuration(worker.age * 1000)}
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {formatDuration(worker.idle)}
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </Card>
-      )}
+      {data ? <WorkerComponentsTable data={data} /> : null}
     </div>
   )
 }

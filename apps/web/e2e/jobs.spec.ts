@@ -212,6 +212,7 @@ test.describe('Jobs', () => {
       await page.getByLabel('Topology queue').selectOption(queueName)
       for (const name of processorNames) {
         await expect(page.getByTestId(`topology-processor-${name}`)).toBeVisible({ timeout: 15000 })
+        await expect(page.getByTestId(`component-row-processor-${queueName}-${name}`)).toBeVisible()
       }
     } finally {
       await safeRemoveJobs(page, { connectionId, queueName, jobIds: createdJobs })
