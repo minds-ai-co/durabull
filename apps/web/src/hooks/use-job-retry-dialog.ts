@@ -28,8 +28,7 @@ export const RetryJobRequestState = {
   ERROR: 'error',
 } as const
 
-export type RetryJobRequestState =
-  (typeof RetryJobRequestState)[keyof typeof RetryJobRequestState]
+export type RetryJobRequestState = (typeof RetryJobRequestState)[keyof typeof RetryJobRequestState]
 
 interface JobRetryDialogState {
   open: boolean

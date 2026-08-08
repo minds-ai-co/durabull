@@ -49,7 +49,10 @@ async function readMcpRequestBody(c: Context): Promise<unknown> {
     return cached
   }
 
-  const body = await c.req.raw.clone().json().catch(() => null)
+  const body = await c.req.raw
+    .clone()
+    .json()
+    .catch(() => null)
   c.set('mcpRequestJsonBody', body)
   return body
 }

@@ -15,9 +15,10 @@ MCP runs inside the unified Durabull API process. There is no separate MCP port 
 
 ## What MCP provides
 
-Phase 1 ships diagnostic tools only — no queue mutations, retries, pauses, or purges.
+Phase 1 ships diagnostic tools plus explicit alert resolution. It does not allow queue
+mutations, retries, pauses, job invocation, job deletion, or purges.
 
-**GA status:** Read-only MCP is implemented on the unified deployment. Before announcing production use, complete the [release checklist](https://github.com/durabullhq/durabull/blob/main/docs/mcp-ga-release-checklist.md) (staging smoke, config verification). Full GA doc set: [GA index](https://github.com/durabullhq/durabull/blob/main/docs/mcp-ga-index.md) (ADR, compliance, security closure, validation evidence).
+**GA status:** Read-mostly MCP is implemented on the unified deployment. Before announcing production use, complete the [release checklist](https://github.com/durabullhq/durabull/blob/main/docs/mcp-ga-release-checklist.md) (staging smoke, config verification). Full GA doc set: [GA index](https://github.com/durabullhq/durabull/blob/main/docs/mcp-ga-index.md) (ADR, compliance, security closure, validation evidence).
 
 | Tool | Scope | Purpose |
 | --- | --- | --- |
@@ -30,7 +31,7 @@ Phase 1 ships diagnostic tools only — no queue mutations, retries, pauses, or 
 | `get_job_logs` | `mcp:logs:read` | Paginated job logs |
 | `get_job_stacktraces` | `mcp:logs:read` | Attempt-indexed stacktraces |
 | `get_failure_events` | `mcp:failures:read` | Alert/failure events |
-| `resolve_alert_event` | `mcp:failures:read` | Mark an alert event resolved |
+| `resolve_alert_event` | `mcp:failures:write` | Mark an alert event resolved |
 | `get_queue_metrics` | `mcp:diagnostics:read` | Queue metrics window |
 | `get_workers` | `mcp:jobs:read` | Worker snapshots |
 | `explain_job_failure` | `mcp:diagnostics:read` + `mcp:jobs:read` + `mcp:logs:read` + `mcp:failures:read` | Deterministic failure summary |
@@ -64,6 +65,7 @@ See the [MCP OAuth operator guide](https://github.com/durabullhq/durabull/blob/m
 | `mcp:jobs:read` | Connection/queue/job/worker reads |
 | `mcp:logs:read` | Logs and stacktraces |
 | `mcp:failures:read` | Failure/alert events |
+| `mcp:failures:write` | Resolve failure/alert events |
 | `mcp:diagnostics:read` | Queue metrics; required (with jobs/logs/failures scopes) for `explain_job_failure` |
 
 Delegated users receive scopes from OAuth consent. Service accounts require explicit policy bindings per tool/scope.

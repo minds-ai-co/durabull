@@ -185,13 +185,7 @@ describe('explain_job_failure handler', () => {
     ])
     expect(result.topSignal.source).toBe('logs')
     expect(result.topSignal.excerpt).toBe('line-10')
-    expect(result.recentLogLines).toEqual([
-      'line-6',
-      'line-7',
-      'line-8',
-      'line-9',
-      'line-10',
-    ])
+    expect(result.recentLogLines).toEqual(['line-6', 'line-7', 'line-8', 'line-9', 'line-10'])
   })
 
   it('throws not_found when the job is missing', async () => {

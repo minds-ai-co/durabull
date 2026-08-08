@@ -1,8 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-
-import { getMcpRequestContext } from '../request-context'
 import type { McpToolInvocationAuditInput } from '../request-context'
+import { getMcpRequestContext } from '../request-context'
 import { sanitizeMcpOutput } from '../safety/sanitize-output'
 
 export interface ListConnectionsHandlerInput {
@@ -386,7 +385,9 @@ export interface RegisterReadToolsOptions {
     input: GetJobStacktracesHandlerInput
   ) => Promise<GetJobStacktracesHandlerOutput>
   getFailureEvents?: (input: GetFailureEventsHandlerInput) => Promise<GetFailureEventsHandlerOutput>
-  resolveAlertEvent?: (input: ResolveAlertEventHandlerInput) => Promise<ResolveAlertEventHandlerOutput>
+  resolveAlertEvent?: (
+    input: ResolveAlertEventHandlerInput
+  ) => Promise<ResolveAlertEventHandlerOutput>
   getQueueMetrics?: (input: GetQueueMetricsHandlerInput) => Promise<GetQueueMetricsHandlerOutput>
   getWorkers?: (input: GetWorkersHandlerInput) => Promise<GetWorkersHandlerOutput>
   explainJobFailure?: (
@@ -469,7 +470,6 @@ function mcpToolFailure(toolError: { code: string; message: string }) {
 }
 
 function finalizeReadToolSuccess(
-  options: RegisterReadToolsOptions,
   toolName: string,
   args: Record<string, unknown>,
   result: Record<string, unknown>
@@ -499,12 +499,7 @@ function finalizeReadToolSuccess(
   }
 }
 
-function finalizeReadToolFailure(
-  options: RegisterReadToolsOptions,
-  toolName: string,
-  args: Record<string, unknown>,
-  error: unknown
-) {
+function finalizeReadToolFailure(toolName: string, args: Record<string, unknown>, error: unknown) {
   const auditInput = {
     toolName,
     arguments: args,
@@ -516,18 +511,32 @@ function finalizeReadToolFailure(
 }
 
 async function runReadTool(
-  options: RegisterReadToolsOptions,
+  _options: RegisterReadToolsOptions,
   toolName: string,
   args: Record<string, unknown>,
   invoke: () => Promise<Record<string, unknown>>
 ) {
   try {
     const result = await invoke()
-    return finalizeReadToolSuccess(options, toolName, args, result)
+    return finalizeReadToolSuccess(toolName, args, result)
   } catch (error) {
-    return finalizeReadToolFailure(options, toolName, args, error)
+    return finalizeReadToolFailure(toolName, args, error)
   }
 }
+
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const
+
+const IDEMPOTENT_WRITE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const
 
 export function registerReadTools(server: McpServer, options: RegisterReadToolsOptions): void {
   const listConnections = options.listConnections
@@ -537,9 +546,9 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
       pageSize: z.number().int().min(1).max(100).optional(),
     }
 
-    server.tool(
+    server.registerTool(
       'list_connections',
-      listConnectionsSchema,
+      { inputSchema: listConnectionsSchema, annotations: READ_ONLY_TOOL_ANNOTATIONS },
       async (args) =>
         runReadTool(options, 'list_connections', args, () =>
           listConnections({
@@ -553,12 +562,15 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const listQueues = options.listQueues
   if (listQueues) {
-    server.tool(
+    server.registerTool(
       'list_queues',
       {
-        connectionId: z.string().min(1),
-        cursor: z.string().optional(),
-        pageSize: z.number().int().min(1).max(100).optional(),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          cursor: z.string().optional(),
+          pageSize: z.number().int().min(1).max(100).optional(),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'list_queues', args, () =>
@@ -574,11 +586,14 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const getQueue = options.getQueue
   if (getQueue) {
-    server.tool(
+    server.registerTool(
       'get_queue',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'get_queue', args, () =>
@@ -593,16 +608,19 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const listJobs = options.listJobs
   if (listJobs) {
-    server.tool(
+    server.registerTool(
       'list_jobs',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1),
-        status: z.string().optional(),
-        name: z.string().optional(),
-        jobId: z.string().optional(),
-        cursor: z.string().optional(),
-        pageSize: z.number().int().min(1).max(100).optional(),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1),
+          status: z.string().optional(),
+          name: z.string().optional(),
+          jobId: z.string().optional(),
+          cursor: z.string().optional(),
+          pageSize: z.number().int().min(1).max(100).optional(),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'list_jobs', args, () =>
@@ -622,12 +640,15 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const getJob = options.getJob
   if (getJob) {
-    server.tool(
+    server.registerTool(
       'get_job',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1),
-        jobId: z.string().min(1),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1),
+          jobId: z.string().min(1),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'get_job', args, () =>
@@ -643,14 +664,17 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const getJobLogs = options.getJobLogs
   if (getJobLogs) {
-    server.tool(
+    server.registerTool(
       'get_job_logs',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1),
-        jobId: z.string().min(1),
-        cursor: z.string().optional(),
-        pageSize: z.number().int().min(1).max(100).optional(),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1),
+          jobId: z.string().min(1),
+          cursor: z.string().optional(),
+          pageSize: z.number().int().min(1).max(100).optional(),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'get_job_logs', args, () =>
@@ -668,14 +692,17 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const getJobStacktraces = options.getJobStacktraces
   if (getJobStacktraces) {
-    server.tool(
+    server.registerTool(
       'get_job_stacktraces',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1),
-        jobId: z.string().min(1),
-        cursor: z.string().optional(),
-        pageSize: z.number().int().min(1).max(100).optional(),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1),
+          jobId: z.string().min(1),
+          cursor: z.string().optional(),
+          pageSize: z.number().int().min(1).max(100).optional(),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'get_job_stacktraces', args, () =>
@@ -693,15 +720,18 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const getFailureEvents = options.getFailureEvents
   if (getFailureEvents) {
-    server.tool(
+    server.registerTool(
       'get_failure_events',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1).optional(),
-        jobId: z.string().min(1).optional(),
-        status: z.enum(['firing', 'resolved', 'suppressed']).optional(),
-        cursor: z.string().optional(),
-        pageSize: z.number().int().min(1).max(100).optional(),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1).optional(),
+          jobId: z.string().min(1).optional(),
+          status: z.enum(['firing', 'resolved', 'suppressed']).optional(),
+          cursor: z.string().optional(),
+          pageSize: z.number().int().min(1).max(100).optional(),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'get_failure_events', args, () =>
@@ -720,11 +750,14 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const resolveAlertEvent = options.resolveAlertEvent
   if (resolveAlertEvent) {
-    server.tool(
+    server.registerTool(
       'resolve_alert_event',
       {
-        connectionId: z.string().min(1),
-        eventId: z.string().min(1),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          eventId: z.string().min(1),
+        },
+        annotations: IDEMPOTENT_WRITE_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'resolve_alert_event', args, () =>
@@ -739,12 +772,15 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const getQueueMetrics = options.getQueueMetrics
   if (getQueueMetrics) {
-    server.tool(
+    server.registerTool(
       'get_queue_metrics',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1),
-        windowMinutes: z.number().int().min(1).max(1440).optional(),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1),
+          windowMinutes: z.number().int().min(1).max(1440).optional(),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'get_queue_metrics', args, () =>
@@ -760,13 +796,16 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const getWorkers = options.getWorkers
   if (getWorkers) {
-    server.tool(
+    server.registerTool(
       'get_workers',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1).optional(),
-        cursor: z.string().optional(),
-        pageSize: z.number().int().min(1).max(100).optional(),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1).optional(),
+          cursor: z.string().optional(),
+          pageSize: z.number().int().min(1).max(100).optional(),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'get_workers', args, () =>
@@ -783,12 +822,15 @@ export function registerReadTools(server: McpServer, options: RegisterReadToolsO
 
   const explainJobFailure = options.explainJobFailure
   if (explainJobFailure) {
-    server.tool(
+    server.registerTool(
       'explain_job_failure',
       {
-        connectionId: z.string().min(1),
-        queueName: z.string().min(1),
-        jobId: z.string().min(1),
+        inputSchema: {
+          connectionId: z.string().min(1),
+          queueName: z.string().min(1),
+          jobId: z.string().min(1),
+        },
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
       },
       async (args) =>
         runReadTool(options, 'explain_job_failure', args, () =>

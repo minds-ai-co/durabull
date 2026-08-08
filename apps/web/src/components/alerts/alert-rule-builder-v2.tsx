@@ -817,10 +817,7 @@ function NotifyPanelBody({
 
   return (
     <div className="space-y-5">
-      <div
-        className="space-y-2"
-        {...(fieldError('routes') ? { 'data-field-error': '' } : {})}
-      >
+      <div className="space-y-2" {...(fieldError('routes') ? { 'data-field-error': '' } : {})}>
         <Label>Saved destinations</Label>
         <DestinationMultiSelect
           destinations={destinations}

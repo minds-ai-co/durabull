@@ -13,7 +13,7 @@ const TOOL_REQUIRED_SCOPES: Record<string, string[]> = {
   get_job_logs: ['mcp:logs:read'],
   get_job_stacktraces: ['mcp:logs:read'],
   get_failure_events: ['mcp:failures:read'],
-  resolve_alert_event: ['mcp:failures:read'],
+  resolve_alert_event: ['mcp:failures:write'],
   get_queue_metrics: ['mcp:diagnostics:read'],
   get_workers: ['mcp:jobs:read'],
   explain_job_failure: [
@@ -99,13 +99,17 @@ export async function evaluateMcpToolPolicy(input: {
   }
 
   if (input.principal.type === 'service_account') {
-    const policyBindings = await mcpPolicyRepository.listPolicyBindings('service_account', input.principal.serviceAccountId)
+    const policyBindings = await mcpPolicyRepository.listPolicyBindings(
+      'service_account',
+      input.principal.serviceAccountId
+    )
     const hasPolicyBinding = requiredScopes.every((scope) =>
       policyBindings.some(
         (binding) =>
           binding.scope === scope &&
           (binding.toolName === null || binding.toolName === input.call.toolName) &&
-          (binding.organizationId === null || binding.organizationId === input.principal.organizationId)
+          (binding.organizationId === null ||
+            binding.organizationId === input.principal.organizationId)
       )
     )
 

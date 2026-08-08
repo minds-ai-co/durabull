@@ -1,8 +1,5 @@
 import { alertEventRepository } from '@durabull/dal'
-import type {
-  ExplainJobFailureHandlerInput,
-  ExplainJobFailureHandlerOutput,
-} from '@durabull/mcp'
+import type { ExplainJobFailureHandlerInput, ExplainJobFailureHandlerOutput } from '@durabull/mcp'
 
 import { getQueue } from '../../lib/redis'
 import { toRedisConnectionOptions } from '../../lib/connection-options'
@@ -96,10 +93,7 @@ export function createExplainJobFailureHandler(
   return async function explainJobFailureHandler(
     input: ExplainJobFailureHandlerInput
   ): Promise<ExplainJobFailureHandlerOutput> {
-    const connection = await deps.requireConnectionForPrincipal(
-      input.principal,
-      input.connectionId
-    )
+    const connection = await deps.requireConnectionForPrincipal(input.principal, input.connectionId)
 
     const queue = await deps.getQueue(
       connection.id,
@@ -110,7 +104,10 @@ export function createExplainJobFailureHandler(
     )
     const job = await queue.getJob(input.jobId)
     if (!job) {
-      throw new McpToolError('not_found', `Job ${input.jobId} not found in queue ${input.queueName}.`)
+      throw new McpToolError(
+        'not_found',
+        `Job ${input.jobId} not found in queue ${input.queueName}.`
+      )
     }
 
     const alertFilters = {
@@ -132,10 +129,7 @@ export function createExplainJobFailureHandler(
     const logCount = logProbe.count ?? logProbe.logs?.length ?? 0
     const logStart = Math.max(0, logCount - EXPLAIN_LOG_LINE_COUNT)
     const logEnd = Math.max(0, logCount - 1)
-    const logs =
-      logCount === 0
-        ? logProbe
-        : await queue.getJobLogs(input.jobId, logStart, logEnd)
+    const logs = logCount === 0 ? logProbe : await queue.getJobLogs(input.jobId, logStart, logEnd)
 
     const logLines = (logs.logs ?? [])
       .map((line) => sanitizeMcpText(line))

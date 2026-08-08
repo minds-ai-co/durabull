@@ -1,21 +1,9 @@
 import { getQueue } from '../../lib/redis'
 import { toRedisConnectionOptions } from '../../lib/connection-options'
 import type { ListJobsHandlerInput, ListJobsHandlerOutput } from '@durabull/mcp'
-import {
-  McpToolError,
-  decodeCursor,
-  encodeCursor,
-  requireConnectionForPrincipal,
-} from './shared'
+import { McpToolError, decodeCursor, encodeCursor, requireConnectionForPrincipal } from './shared'
 
-type JobState =
-  | 'waiting'
-  | 'active'
-  | 'completed'
-  | 'failed'
-  | 'delayed'
-  | 'paused'
-  | 'prioritized'
+type JobState = 'waiting' | 'active' | 'completed' | 'failed' | 'delayed' | 'paused' | 'prioritized'
 
 const ALL_STATES: JobState[] = [
   'waiting',

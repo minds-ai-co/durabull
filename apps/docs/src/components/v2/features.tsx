@@ -39,7 +39,7 @@ function CommandTokens({ command, upTo }: { command: string; upTo: number }) {
     parts.push(
       <span key={i} className={className}>
         {visible}
-      </span>,
+      </span>
     )
   }
 
@@ -290,7 +290,10 @@ function TimelineColumn({
                   variants={{
                     hidden: { opacity: 0 },
                     // terminal-style flicker as the timestamp lands
-                    show: { opacity: [0, 1, 0.25, 1], transition: { duration: 0.4, times: [0, 0.3, 0.6, 1] } },
+                    show: {
+                      opacity: [0, 1, 0.25, 1],
+                      transition: { duration: 0.4, times: [0, 0.3, 0.6, 1] },
+                    },
                   }}
                 >
                   {time}

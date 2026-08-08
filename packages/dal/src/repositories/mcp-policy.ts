@@ -7,6 +7,7 @@ import { getDb } from '../db/client'
 import {
   getEnvRedisConnectionIdsForOrganization,
   shouldUseEnvConnections,
+  syncEnvConnectionsForOrganization,
 } from '../db/env-redis-connections'
 import {
   type McpPrincipalType,
@@ -21,6 +22,22 @@ import { redisConnection } from '../db/schemas/redis-connection/schema'
 
 const MCP_SECRET_PREFIX = 'dbsa'
 const scryptAsync = promisify(scrypt)
+
+async function syncEnvConnectionsForDelegatedUser(
+  db: Awaited<ReturnType<typeof getDb>>,
+  userId: string
+): Promise<void> {
+  if (!shouldUseEnvConnections()) return
+
+  const memberships = await db
+    .select({ organizationId: member.organizationId })
+    .from(member)
+    .where(eq(member.userId, userId))
+
+  for (const membership of memberships) {
+    await syncEnvConnectionsForOrganization(db, membership.organizationId)
+  }
+}
 
 async function hashSecret(secret: string): Promise<string> {
   const salt = randomBytes(16).toString('hex')
@@ -87,7 +104,12 @@ export const mcpPolicyRepository = {
     const rows = await db
       .select()
       .from(mcpServiceAccount)
-      .where(and(eq(mcpServiceAccount.oauthClientId, oauthClientId), eq(mcpServiceAccount.disabled, false)))
+      .where(
+        and(
+          eq(mcpServiceAccount.oauthClientId, oauthClientId),
+          eq(mcpServiceAccount.disabled, false)
+        )
+      )
       .limit(1)
     return rows[0] ?? null
   },
@@ -102,7 +124,10 @@ export const mcpPolicyRepository = {
     return rows[0] ?? null
   },
 
-  async issueServiceAccountSecret(serviceAccountId: string, opts?: { createdByUserId?: string | null; label?: string | null; expiresAt?: Date | null }) {
+  async issueServiceAccountSecret(
+    serviceAccountId: string,
+    opts?: { createdByUserId?: string | null; label?: string | null; expiresAt?: Date | null }
+  ) {
     const db = await getDb()
     const secret = generateServiceAccountSecret()
     const now = new Date()
@@ -126,7 +151,10 @@ export const mcpPolicyRepository = {
     return { secret, record }
   },
 
-  async rotateServiceAccountSecret(serviceAccountId: string, opts?: { createdByUserId?: string | null; label?: string | null; revokeActiveSecrets?: boolean }) {
+  async rotateServiceAccountSecret(
+    serviceAccountId: string,
+    opts?: { createdByUserId?: string | null; label?: string | null; revokeActiveSecrets?: boolean }
+  ) {
     const db = await getDb()
     const now = new Date()
     return db.transaction(async (tx) => {
@@ -221,6 +249,7 @@ export const mcpPolicyRepository = {
 
   async canDelegatedUserAccessConnection(userId: string, connectionId: string): Promise<boolean> {
     const db = await getDb()
+    await syncEnvConnectionsForDelegatedUser(db, userId)
     const rows = await db
       .select({ id: redisConnection.id })
       .from(redisConnection)
@@ -244,6 +273,7 @@ export const mcpPolicyRepository = {
     }>
   > {
     const db = await getDb()
+    await syncEnvConnectionsForDelegatedUser(db, userId)
     const rows = await db
       .select({
         id: redisConnection.id,
@@ -261,8 +291,12 @@ export const mcpPolicyRepository = {
     return rows
   },
 
-  async doesConnectionBelongToOrganization(connectionId: string, organizationId: string): Promise<boolean> {
+  async doesConnectionBelongToOrganization(
+    connectionId: string,
+    organizationId: string
+  ): Promise<boolean> {
     const db = await getDb()
+    await syncEnvConnectionsForOrganization(db, organizationId)
     const envConnectionIds = shouldUseEnvConnections()
       ? getEnvRedisConnectionIdsForOrganization(organizationId)
       : null

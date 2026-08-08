@@ -6,14 +6,15 @@
  * @see https://better-auth.com/docs/plugins/mcp
  */
 import { createMiddleware } from 'hono/factory'
+import 'hono'
 
 import {
   buildMcpInsufficientScopeResponse,
   buildMcpMissingBearerResponse,
   buildMcpUnauthorizedResponse,
 } from './json-rpc-auth-response'
-import { extractBearerToken, validateMcpAccessTokenClaims } from './validate-token'
 import type { McpAccessTokenClaims } from './types'
+import { extractBearerToken, validateMcpAccessTokenClaims } from './validate-token'
 
 export interface McpBearerAuthMiddlewareOptions {
   canonicalResourceUri: string

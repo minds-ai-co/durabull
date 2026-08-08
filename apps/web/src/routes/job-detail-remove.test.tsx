@@ -2,8 +2,8 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { routeState, topBarState, navigateMock, removeMutateMock, trackEventMock } =
-  vi.hoisted(() => ({
+const { routeState, topBarState, navigateMock, removeMutateMock, trackEventMock } = vi.hoisted(
+  () => ({
     routeState: {
       params: {
         orgSlug: 'acme',
@@ -17,7 +17,8 @@ const { routeState, topBarState, navigateMock, removeMutateMock, trackEventMock 
     navigateMock: vi.fn(),
     removeMutateMock: vi.fn(),
     trackEventMock: vi.fn(),
-  }))
+  })
+)
 
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children }: { children: React.ReactNode }) => <a href="/">{children}</a>,

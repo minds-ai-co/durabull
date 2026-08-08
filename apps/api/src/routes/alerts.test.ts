@@ -949,10 +949,7 @@ describe('alerts routes', () => {
       cooldownMinutes: 30,
     })
 
-    const tooLong = await app.request(
-      `/rules/${rule.id}/snooze`,
-      jsonRequest({ minutes: 10081 })
-    )
+    const tooLong = await app.request(`/rules/${rule.id}/snooze`, jsonRequest({ minutes: 10081 }))
     expect(tooLong.status).toBe(400)
   })
 
@@ -1001,10 +998,9 @@ describe('alerts routes', () => {
 
   it('requires an authenticated user to acknowledge', async () => {
     const app = await createAlertsRouteApp()
-    const response = await app.request(
-      '/events/66666666-6666-4666-8666-666666666666/acknowledge',
-      { method: 'POST' }
-    )
+    const response = await app.request('/events/66666666-6666-4666-8666-666666666666/acknowledge', {
+      method: 'POST',
+    })
     expect(response.status).toBe(401)
   })
 

@@ -66,7 +66,7 @@ describe('sendPosthogBatch', () => {
         status: 200,
         body: { cancel },
       } as unknown as Response
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const accepted = await sendPosthogBatch(
       { posthogBatchUrl: 'https://us.i.posthog.com/batch/', posthogKey: 'phc_test' },
@@ -94,7 +94,7 @@ describe('sendPosthogBatch', () => {
         status: 302,
         body: { cancel },
       } as unknown as Response
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const accepted = await sendPosthogBatch(
       { posthogBatchUrl: 'https://us.i.posthog.com/batch/', posthogKey: 'phc_test' },

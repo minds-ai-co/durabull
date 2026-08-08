@@ -126,12 +126,7 @@ function LogStream({ entries, inFlight }: { entries: RetryJobLogEntry[]; inFligh
   )
 }
 
-export function RetryJobDialog({
-  queueName,
-  jobId,
-  jobName,
-  retry,
-}: RetryJobDialogProps) {
+export function RetryJobDialog({ queueName, jobId, jobName, retry }: RetryJobDialogProps) {
   const handleOpenChange = (nextOpen: boolean) => {
     trackEvent(nextOpen ? AnalyticsEvents.DIALOG_OPENED : AnalyticsEvents.DIALOG_CLOSED, {
       [AnalyticsProperties.DIALOG_TYPE]: DialogType.RETRY_JOB,

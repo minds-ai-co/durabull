@@ -281,7 +281,12 @@ describe('useJobRetryDialog', () => {
   })
 
   it('ignores stale retry completions after the dialog closes', async () => {
-    let resolveSnapshot: (value: { logs: string[]; count: number; start: number; hasMore: boolean }) => void
+    let resolveSnapshot: (value: {
+      logs: string[]
+      count: number
+      start: number
+      hasMore: boolean
+    }) => void
     fetchQueryMock.mockReturnValue(
       new Promise((resolve) => {
         resolveSnapshot = resolve

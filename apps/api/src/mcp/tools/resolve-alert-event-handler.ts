@@ -1,8 +1,5 @@
 import { alertEventRepository } from '@durabull/dal'
-import type {
-  ResolveAlertEventHandlerInput,
-  ResolveAlertEventHandlerOutput,
-} from '@durabull/mcp'
+import type { ResolveAlertEventHandlerInput, ResolveAlertEventHandlerOutput } from '@durabull/mcp'
 
 import { McpToolError, requireConnectionForPrincipal } from './shared'
 import { toMcpAlertEventSummary } from './mcp-sanitize'

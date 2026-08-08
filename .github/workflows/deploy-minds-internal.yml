@@ -6,6 +6,12 @@ on:
       - main
     paths:
       - .github/workflows/deploy-minds-internal.yml
+      - apps/api/**
+      - apps/web/**
+      - packages/**
+      - tooling/docker/**
+      - package.json
+      - bun.lock
       - deploy/digitalocean-app.template.json
       - deploy/render-digitalocean-spec.sh
   workflow_dispatch:
@@ -19,6 +25,7 @@ concurrency:
 
 env:
   PRODUCTION_VALKEY_CLUSTER_ID: 1a8db10a-cad7-4eb3-8073-c046e98e5a7f
+  DURABULL_IMAGE: registry.digitalocean.com/training/durabull
 
 jobs:
   deploy:
@@ -62,8 +69,32 @@ jobs:
             exit 1
           fi
 
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Build and publish immutable application image
+        env:
+          DURABULL_IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          doctl registry login --expiry-seconds 1200
+          build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          app_version=$(jq -er '.version' package.json)
+          docker build \
+            -f tooling/docker/Dockerfile \
+            --build-arg "DURABULL_APP_VERSION=$app_version" \
+            --build-arg "DURABULL_BUILD_ID=$GITHUB_SHA" \
+            --build-arg "DURABULL_BUILD_TIME=$build_time" \
+            --build-arg "DURABULL_RELEASE_CHANNEL=minds-internal" \
+            -t "$DURABULL_IMAGE:$DURABULL_IMAGE_TAG" \
+            .
+          docker push "$DURABULL_IMAGE:$DURABULL_IMAGE_TAG"
+
       - name: Render app spec
         env:
+          DURABULL_IMAGE_TAG: ${{ github.sha }}
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
           DURABULL_MCP_AUTHLESS_BEARER: ${{ secrets.DURABULL_MCP_AUTHLESS_BEARER }}
           DURABULL_REDIS_URL_ENCRYPTION_KEY: ${{ secrets.DURABULL_REDIS_URL_ENCRYPTION_KEY }}
@@ -75,11 +106,6 @@ jobs:
           deploy/render-digitalocean-spec.sh \
             deploy/digitalocean-app.template.json \
             deploy/digitalocean-app.rendered.json
-
-      - name: Install doctl
-        uses: digitalocean/action-doctl@v2
-        with:
-          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
 
       - name: Validate app spec
         run: doctl apps spec validate deploy/digitalocean-app.rendered.json
@@ -131,119 +157,41 @@ jobs:
             -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}"
             -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}"
           )
-          health_body="$RUNNER_TEMP/durabull-health.json"
+          for protected_path in / /api/health; do
+            for boundary in public mcp-service-credential; do
+              boundary_headers=()
+              if [ "$boundary" = "mcp-service-credential" ]; then
+                boundary_headers=("${access_headers[@]}")
+              fi
+              boundary_code=$(curl -sS \
+                --max-time 20 \
+                -o /dev/null \
+                -w '%{http_code}' \
+                "${boundary_headers[@]}" \
+                "$base_url$protected_path")
+              if [ "$boundary_code" != "302" ] && [ "$boundary_code" != "403" ]; then
+                echo "::error::$boundary access to $protected_path returned HTTP $boundary_code; expected Cloudflare Access rejection"
+                exit 1
+              fi
+            done
+          done
 
-          access_boundary_code=$(curl -sS \
+          initialize_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"minds-deploy-e2e","version":"1.0.0"}}}'
+          mcp_without_cloudflare=$(curl -sS \
             --max-time 20 \
             -o /dev/null \
             -w '%{http_code}' \
-            "$base_url/api/health")
-          if [ "$access_boundary_code" != "302" ]; then
-            echo "::error::Unauthenticated health returned HTTP $access_boundary_code; expected Cloudflare Access redirect"
+            -H "Origin: $base_url" \
+            -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'Content-Type: application/json' \
+            --data "$initialize_payload" \
+            "$base_url/mcp")
+          if [ "$mcp_without_cloudflare" != "302" ] && [ "$mcp_without_cloudflare" != "403" ]; then
+            echo "::error::MCP without Cloudflare credentials returned HTTP $mcp_without_cloudflare; expected Access rejection"
             exit 1
           fi
 
-          healthy=false
-          for attempt in $(seq 1 12); do
-            health_code=$(curl -sS \
-              --max-time 20 \
-              -o "$health_body" \
-              -w '%{http_code}' \
-              "${access_headers[@]}" \
-              "$base_url/api/health" || true)
-            if [ "$health_code" = "200" ] && jq -e '.status == "ok"' "$health_body" >/dev/null; then
-              healthy=true
-              break
-            fi
-            echo "protected health attempt ${attempt}/12 returned HTTP ${health_code:-000}"
-            sleep 5
-          done
-          if [ "$healthy" != "true" ]; then
-            echo "::error::Protected Durabull health check did not become ready"
-            exit 1
-          fi
-
-          curl -fsS \
-            --max-time 20 \
-            "${access_headers[@]}" \
-            "$base_url/api/app/config" \
-            | jq -e '
-                .authless == true and
-                .envConnections == true and
-                .persistence == "pglite" and
-                .stateless == true and
-                .environment == "production"
-              ' >/dev/null
-
-          curl -fsS \
-            --max-time 20 \
-            "${access_headers[@]}" \
-            "$base_url/api/auth/get-session" \
-            | jq -e '
-                .user.id == "authless-user" and
-                .session.activeOrganizationId == "authless-org"
-              ' >/dev/null
-
-          connections_body="$RUNNER_TEMP/durabull-connections.json"
-          curl -fsS \
-            --max-time 20 \
-            "${access_headers[@]}" \
-            "$base_url/api/connections" \
-            > "$connections_body"
-          jq -e '
-                ([.connections[].name] | sort) == ["Production", "Staging"] and
-                ([.connections[] | select(.name == "Production" and .isDefault == true)] | length) == 1
-              ' "$connections_body" >/dev/null
-
-          for connection_name in Production Staging; do
-            connection_id=$(jq -er \
-              --arg name "$connection_name" \
-              '.connections[] | select(.name == $name) | .id' \
-              "$connections_body")
-            discovery_body="$RUNNER_TEMP/durabull-discovery-${connection_name}.json"
-            discovery_code=$(curl -sS \
-              --max-time 60 \
-              -o "$discovery_body" \
-              -w '%{http_code}' \
-              -X POST \
-              "${access_headers[@]}" \
-              "$base_url/api/c/$connection_id/queues/discovery?wait=true")
-            if [ "$discovery_code" != "200" ]; then
-              echo "::error::$connection_name Redis discovery returned HTTP $discovery_code"
-              jq -c '{error, message}' "$discovery_body" || true
-              exit 1
-            fi
-            jq -e '
-                .running == false and
-                .lastError == null and
-                .scannedPages >= 1 and
-                .indexed.total >= 1 and
-                .indexed.confirmed >= 1
-              ' "$discovery_body" >/dev/null
-
-            queues_body="$RUNNER_TEMP/durabull-queues-${connection_name}.json"
-            curl -fsS \
-              --max-time 30 \
-              "${access_headers[@]}" \
-              "$base_url/api/c/$connection_id/queues?page=1&pageSize=5" \
-              > "$queues_body"
-            jq -e '
-                .total >= 1 and
-                (.queues | length) >= 1 and
-                all(.queues[];
-                  (.name | type == "string" and length >= 1) and
-                  (.jobCounts | type == "object")
-                )
-              ' "$queues_body" >/dev/null
-          done
-
-          curl -fsS \
-            --max-time 20 \
-            "${access_headers[@]}" \
-            "$base_url/" \
-            | grep -F '<title>Durabull - BullMQ Admin Dashboard</title>' >/dev/null
-
-          initialize_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"minds-deploy-e2e","version":"1.0.0"}}}'
           mcp_without_bearer=$(curl -sS \
             --max-time 20 \
             -o /dev/null \
@@ -260,8 +208,10 @@ jobs:
           fi
 
           mcp_body="$RUNNER_TEMP/durabull-mcp-initialize.txt"
+          mcp_headers="$RUNNER_TEMP/durabull-mcp-initialize.headers"
           mcp_code=$(curl -sS \
             --max-time 20 \
+            -D "$mcp_headers" \
             -o "$mcp_body" \
             -w '%{http_code}' \
             "${access_headers[@]}" \
@@ -276,7 +226,138 @@ jobs:
             exit 1
           fi
 
-          echo "Protected health, authless UI state, Redis discovery, queue metrics, and MCP initialize: ok"
+          mcp_session_id=$(awk '
+            BEGIN { IGNORECASE=1 }
+            /^mcp-session-id:/ {
+              gsub(/\r/, "", $2)
+              print $2
+            }
+          ' "$mcp_headers" | tail -n 1)
+          if [ -z "$mcp_session_id" ]; then
+            echo "::error::Authenticated MCP initialize returned no session ID"
+            exit 1
+          fi
+
+          tools_body="$RUNNER_TEMP/durabull-mcp-tools.txt"
+          tools_payload='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          curl -fsS \
+            --max-time 20 \
+            -o "$tools_body" \
+            "${access_headers[@]}" \
+            -H "Origin: $base_url" \
+            -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
+            -H "Mcp-Session-Id: $mcp_session_id" \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'Content-Type: application/json' \
+            --data "$tools_payload" \
+            "$base_url/mcp"
+          tools_json="$RUNNER_TEMP/durabull-mcp-tools.json"
+          sed -n 's/^data: //p' "$tools_body" | tail -n 1 > "$tools_json"
+          jq -e '
+            (.result.tools | length) == 13 and
+            ([.result.tools[].name] | sort) == ([
+              "explain_job_failure", "get_failure_events", "get_job",
+              "get_job_logs", "get_job_stacktraces", "get_queue",
+              "get_queue_metrics", "get_workers", "list_connections",
+              "list_jobs", "list_queues", "ping", "resolve_alert_event"
+            ] | sort) and
+            all(.result.tools[] | select(.name != "resolve_alert_event");
+              .annotations == {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              }
+            ) and
+            (.result.tools[] | select(.name == "resolve_alert_event") | .annotations) == {
+              "readOnlyHint": false,
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false
+            }
+          ' "$tools_json" >/dev/null
+
+          list_connections_body="$RUNNER_TEMP/durabull-mcp-list-connections.txt"
+          list_connections_payload='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_connections","arguments":{"pageSize":10}}}'
+          curl -fsS \
+            --max-time 20 \
+            -o "$list_connections_body" \
+            "${access_headers[@]}" \
+            -H "Origin: $base_url" \
+            -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
+            -H "Mcp-Session-Id: $mcp_session_id" \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'Content-Type: application/json' \
+            --data "$list_connections_payload" \
+            "$base_url/mcp"
+          list_connections_json="$RUNNER_TEMP/durabull-mcp-list-connections.json"
+          sed -n 's/^data: //p' "$list_connections_body" | tail -n 1 > "$list_connections_json"
+          jq -e '
+            .result.isError != true and
+            (.result.content[0].text | fromjson | .connections | map(.name) | sort) == ["Production", "Staging"]
+          ' "$list_connections_json" >/dev/null
+          jq -r '.result.content[0].text' "$list_connections_json" \
+            > "$RUNNER_TEMP/durabull-mcp-connections.json"
+
+          for connection_name in Production Staging; do
+            connection_id=$(jq -er \
+              --arg name "$connection_name" \
+              '.connections[] | select(.name == $name) | .id' \
+              "$RUNNER_TEMP/durabull-mcp-connections.json")
+            queues_ready=false
+            for attempt in $(seq 1 12); do
+              list_queues_payload=$(jq -cn \
+                --arg connection_id "$connection_id" \
+                '{jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"list_queues",arguments:{connectionId:$connection_id,pageSize:5}}}')
+              list_queues_body="$RUNNER_TEMP/durabull-mcp-list-queues-${connection_name}.txt"
+              curl -fsS \
+                --max-time 30 \
+                -o "$list_queues_body" \
+                "${access_headers[@]}" \
+                -H "Origin: $base_url" \
+                -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
+                -H "Mcp-Session-Id: $mcp_session_id" \
+                -H 'Accept: application/json, text/event-stream' \
+                -H 'Content-Type: application/json' \
+                --data "$list_queues_payload" \
+                "$base_url/mcp"
+              list_queues_json="$RUNNER_TEMP/durabull-mcp-list-queues-${connection_name}.json"
+              sed -n 's/^data: //p' "$list_queues_body" | tail -n 1 > "$list_queues_json"
+              if jq -e '
+                .result.isError != true and
+                (.result.content[0].text | fromjson) as $payload and
+                $payload.total >= 1 and
+                ($payload.queues | length) >= 1 and
+                all($payload.queues[];
+                  (.name | type == "string" and length >= 1) and
+                  (.jobCounts | type == "object")
+                )
+              ' "$list_queues_json" >/dev/null; then
+                queues_ready=true
+                break
+              fi
+              echo "$connection_name MCP queue check attempt ${attempt}/12 not ready"
+              sleep 5
+            done
+            if [ "$queues_ready" != "true" ]; then
+              echo "::error::$connection_name queues did not become available through MCP"
+              exit 1
+            fi
+          done
+
+          app_id=$(doctl apps list --output json \
+            | jq -er '.[] | select(.spec.name == "minds-durabull-internal") | .id')
+          doctl apps get "$app_id" --output json \
+            | jq -e --arg build_id "$GITHUB_SHA" '
+                .spec.services[] |
+                select(.name == "durabull") |
+                .image.registry_type == "DOCR" and
+                .image.registry == "training" and
+                .image.repository == "durabull" and
+                .image.tag == $build_id
+              ' >/dev/null
+
+          echo "Cloudflare path isolation, immutable image, 13 MCP tool annotations, Production/Staging connections, and live Redis queue reads through MCP: ok"
 
       - name: Record deployment boundary
         run: |
@@ -286,7 +367,7 @@ jobs:
             echo "- DigitalOcean app: \`minds-durabull-internal\`"
             echo "- Public DigitalOcean ingress: none"
             echo "- Origin path: Cloudflare Tunnel → \`http://durabull:3000\`"
-            echo "- Protected health, authless state, Production/Staging Redis discovery, queue metrics, and MCP initialize: verified"
+            echo "- Cloudflare dashboard isolation, MCP dual-auth boundary, immutable source image, 13 MCP tools/annotations, Production/Staging connections, and live Redis queue reads through MCP: verified"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove rendered secret material

@@ -3,11 +3,7 @@ import { describe, expect, it } from 'bun:test'
 import { createMcpBearerAuthMiddleware, MCP_SCOPE_DISCOVER } from './auth'
 import { MCP_PROTOCOL_VERSION } from './constants'
 import { createMcpRoutes } from './routes'
-import {
-  MCP_JSON_RPC_VERSION,
-  postMcpJson,
-  readMcpJsonResponse,
-} from './testing/mcp-test-client'
+import { MCP_JSON_RPC_VERSION, postMcpJson, readMcpJsonResponse } from './testing/mcp-test-client'
 
 const canonicalResourceUri = 'http://localhost:3000/mcp'
 const resourceMetadataUrl = 'http://localhost:3000/.well-known/oauth-protected-resource'

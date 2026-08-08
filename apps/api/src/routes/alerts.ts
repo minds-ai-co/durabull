@@ -748,7 +748,9 @@ async function validateNotificationChannels(
       organizationId
     )
     if (!destination) {
-      return isDestination ? 'Notification destination not found.' : 'Webhook destination not found.'
+      return isDestination
+        ? 'Notification destination not found.'
+        : 'Webhook destination not found.'
     }
     if (isSavedWebhook && destination.type !== 'webhook') {
       return `Destination "${destination.name}" is not a webhook destination.`

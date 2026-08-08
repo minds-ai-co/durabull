@@ -12,6 +12,7 @@ export DURABULL_REDIS_URL_ENCRYPTION_KEY=000000000000000000000000000000000000000
 export DURABULL_SECRET_ENCRYPTION_KEY=1111111111111111111111111111111111111111111111111111111111111111
 export DURABULL_PRODUCTION_REDIS_URL='rediss://user:password@production.example.invalid:25061'
 export DURABULL_STAGING_REDIS_URL='rediss://user:password@staging.example.invalid:25061'
+export DURABULL_IMAGE_TAG=0123456789abcdef0123456789abcdef01234567
 
 "$repo_root/deploy/render-digitalocean-spec.sh" \
   "$repo_root/deploy/digitalocean-app.template.json" \
@@ -27,7 +28,12 @@ jq -e '
   (.services[] | select(.name == "durabull") | .internal_ports == [3000]) and
   (.workers[] | select(.name == "cloudflared") | (.http_port | not)) and
   (.workers[] | select(.name == "cloudflared") | .run_command == "cloudflared tunnel --protocol http2 --no-autoupdate run") and
-  (.services[] | select(.name == "durabull") | .image.tag == "v1.17.0") and
+  (.services[] | select(.name == "durabull") | .image == {
+    "registry_type": "DOCR",
+    "registry": "training",
+    "repository": "durabull",
+    "tag": "0123456789abcdef0123456789abcdef01234567"
+  }) and
   (.workers[] | select(.name == "cloudflared") | .image.tag == "2026.7.2") and
   ([.services[].envs[] | select(.key == "DURABULL_REDIS_URL_PRODUCTION")] | length) == 1 and
   ([.services[].envs[] | select(.key == "DURABULL_REDIS_URL_STAGING")] | length) == 1 and

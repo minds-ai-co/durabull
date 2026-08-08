@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Hono } from 'hono'
 import {
   closeDb,
   getDb,
@@ -16,34 +15,30 @@ import {
   redisConnectionRepository,
   user,
 } from '@durabull/dal'
-import { MCP_PROTOCOL_VERSION } from '@durabull/mcp'
-import {
-  MCP_JSON_RPC_VERSION,
-  mcpHeaders,
-  parseSseJson,
-  postMcpJson,
-} from '@durabull/mcp/testing'
 import { env } from '@durabull/env'
+import { MCP_PROTOCOL_VERSION } from '@durabull/mcp'
+import { MCP_JSON_RPC_VERSION, mcpHeaders, parseSseJson, postMcpJson } from '@durabull/mcp/testing'
+import type { Hono } from 'hono'
 import { createApiApp } from '../app'
 import { DEFAULT_AUTHLESS_MCP_BEARER_TOKEN } from './auth/mcp-auth-config'
 
 const mutableEnv = env as {
   APP_BASE_URL?: string
   DURABULL_AUTHLESS?: boolean
+  DURABULL_REDIS_URL_ENCRYPTION_KEY?: string
 }
 
 const originalAppBaseUrl = mutableEnv.APP_BASE_URL
 const originalAuthless = mutableEnv.DURABULL_AUTHLESS
 const originalPgliteDir = process.env.DURABULL_PGLITE_DIR
 const originalRedisUrlEncryptionKey = process.env.DURABULL_REDIS_URL_ENCRYPTION_KEY
+const originalParsedRedisUrlEncryptionKey = mutableEnv.DURABULL_REDIS_URL_ENCRYPTION_KEY
 
 const authlessAuthorization = `Bearer ${DEFAULT_AUTHLESS_MCP_BEARER_TOKEN}`
 const mcpResource = 'http://localhost:3000/mcp'
-const resourceMetadataUrl =
-  'http://localhost:3000/api/auth/.well-known/oauth-protected-resource'
+const resourceMetadataUrl = 'http://localhost:3000/api/auth/.well-known/oauth-protected-resource'
 
-const TEST_REDIS_ENCRYPTION_KEY =
-  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+const TEST_REDIS_ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
 let tempPgliteDir = ''
 let app: Hono
@@ -55,6 +50,7 @@ describe('api MCP ingress', () => {
     mutableEnv.APP_BASE_URL = 'http://localhost:3000'
     mutableEnv.DURABULL_AUTHLESS = true
     process.env.DURABULL_REDIS_URL_ENCRYPTION_KEY = TEST_REDIS_ENCRYPTION_KEY
+    mutableEnv.DURABULL_REDIS_URL_ENCRYPTION_KEY = TEST_REDIS_ENCRYPTION_KEY
     await closeDb()
     ;({ app } = await createApiApp({ enableLogging: false }))
   })
@@ -75,6 +71,7 @@ describe('api MCP ingress', () => {
     } else {
       delete process.env.DURABULL_REDIS_URL_ENCRYPTION_KEY
     }
+    mutableEnv.DURABULL_REDIS_URL_ENCRYPTION_KEY = originalParsedRedisUrlEncryptionKey
 
     if (tempPgliteDir) {
       await rm(tempPgliteDir, { recursive: true, force: true })
@@ -82,7 +79,10 @@ describe('api MCP ingress', () => {
     }
   })
 
-  const postMcp = (body: Parameters<typeof postMcpJson>[2], options?: Parameters<typeof postMcpJson>[3]) =>
+  const postMcp = (
+    body: Parameters<typeof postMcpJson>[2],
+    options?: Parameters<typeof postMcpJson>[3]
+  ) =>
     postMcpJson((path, init) => Promise.resolve(app.request(path, init)), '/mcp', body, {
       authorization: authlessAuthorization,
       ...options,
@@ -169,6 +169,7 @@ describe('api MCP ingress', () => {
     expect(metadata.scopes_supported).toBeDefined()
     expect(metadata.scopes_supported).toContain('mcp:discover')
     expect(metadata.scopes_supported).toContain('mcp:jobs:read')
+    expect(metadata.scopes_supported).toContain('mcp:failures:write')
     expect(metadata.scopes_supported).toContain('openid')
   })
 
@@ -208,7 +209,17 @@ describe('api MCP ingress', () => {
 
     expect(listResponse.status).toBe(200)
     const listPayload = parseSseJson(await listResponse.text()) as {
-      result?: { tools?: Array<{ name: string }> }
+      result?: {
+        tools?: Array<{
+          name: string
+          annotations?: {
+            readOnlyHint?: boolean
+            destructiveHint?: boolean
+            idempotentHint?: boolean
+            openWorldHint?: boolean
+          }
+        }>
+      }
     }
     const toolNames = listPayload.result?.tools?.map((tool) => tool.name) ?? []
     expect(toolNames).toContain('ping')
@@ -224,6 +235,24 @@ describe('api MCP ingress', () => {
     expect(toolNames).toContain('get_queue_metrics')
     expect(toolNames).toContain('get_workers')
     expect(toolNames).toContain('explain_job_failure')
+
+    const tools = listPayload.result?.tools ?? []
+    const readOnlyTools = tools.filter((tool) => tool.name !== 'resolve_alert_event')
+    expect(readOnlyTools).toHaveLength(12)
+    for (const tool of readOnlyTools) {
+      expect(tool.annotations).toEqual({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      })
+    }
+    expect(tools.find((tool) => tool.name === 'resolve_alert_event')?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    })
 
     const callResponse = await postMcp(
       {
@@ -243,6 +272,28 @@ describe('api MCP ingress', () => {
       result?: { content?: Array<{ type: string; text?: string }> }
     }
     expect(callPayload.result?.content?.[0]?.text).toBe('pong')
+
+    const connectionsResponse = await postMcp(
+      {
+        jsonrpc: MCP_JSON_RPC_VERSION,
+        id: 4,
+        method: 'tools/call',
+        params: {
+          name: 'list_connections',
+          arguments: { pageSize: 10 },
+        },
+      },
+      { sessionId: sessionId ?? undefined }
+    )
+    expect(connectionsResponse.status).toBe(200)
+    const connectionsPayload = parseSseJson(await connectionsResponse.text()) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> }
+    }
+    expect(connectionsPayload.result?.isError).not.toBe(true)
+    const connectionsResult = JSON.parse(connectionsPayload.result?.content?.[0]?.text ?? '{}') as {
+      connections?: unknown[]
+    }
+    expect(connectionsResult.connections).toBeDefined()
   })
 
   it('returns 401 for expired OAuth access tokens', async () => {
@@ -1137,8 +1188,7 @@ describe('api MCP ingress', () => {
       refreshTokenExpiresAt: future,
       clientId,
       userId: null,
-      scopes:
-        'mcp:discover mcp:diagnostics:read mcp:jobs:read mcp:logs:read mcp:failures:read',
+      scopes: 'mcp:discover mcp:diagnostics:read mcp:jobs:read mcp:logs:read mcp:failures:read',
       resource: mcpResource,
       createdAt: now,
       updatedAt: now,
@@ -1573,7 +1623,9 @@ describe('api MCP ingress', () => {
     const parsed = JSON.parse(payload.result?.content?.[0]?.text ?? '{}') as {
       connections?: Array<{ name: string }>
     }
-    expect(parsed.connections?.map((connection) => connection.name)).toContain('Service Account Conn')
+    expect(parsed.connections?.map((connection) => connection.name)).toContain(
+      'Service Account Conn'
+    )
   })
 
   it('does not treat GET /mcp as SPA static fallback when web build is absent', async () => {

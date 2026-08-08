@@ -12,13 +12,12 @@ const baseSession: McpSession = {
   clientId: 'client-id',
   userId: 'user-1',
   scopes:
-    'mcp:discover mcp:jobs:read mcp:logs:read mcp:failures:read mcp:diagnostics:read',
+    'mcp:discover mcp:jobs:read mcp:logs:read mcp:failures:read mcp:failures:write mcp:diagnostics:read',
 }
 
 const diagnosticsSession: McpSession = {
   ...baseSession,
-  scopes:
-    'mcp:discover mcp:diagnostics:read mcp:jobs:read mcp:logs:read mcp:failures:read',
+  scopes: 'mcp:discover mcp:diagnostics:read mcp:jobs:read mcp:logs:read mcp:failures:read',
 }
 
 const delegatedPrincipal: McpPrincipal = {
@@ -79,5 +78,35 @@ describe('evaluateMcpToolPolicy', () => {
       'mcp:failures:read',
     ])
     expect(diagnosticsDecision.granted).toBe(true)
+  })
+
+  it('requires write scope to resolve an alert event', async () => {
+    const allowed = await evaluateMcpToolPolicy({
+      correlationId: 'corr-write-1',
+      principal: delegatedPrincipal,
+      session: baseSession,
+      call: {
+        toolName: 'resolve_alert_event',
+        arguments: {},
+        connectionId: null,
+      },
+    })
+
+    expect(allowed.requiredScopes).toEqual(['mcp:failures:write'])
+    expect(allowed.granted).toBe(true)
+
+    const denied = await evaluateMcpToolPolicy({
+      correlationId: 'corr-write-2',
+      principal: delegatedPrincipal,
+      session: { ...baseSession, scopes: 'mcp:discover mcp:failures:read' },
+      call: {
+        toolName: 'resolve_alert_event',
+        arguments: {},
+        connectionId: null,
+      },
+    })
+
+    expect(denied.granted).toBe(false)
+    expect(denied.denialReason).toBe('missing_scopes:mcp:failures:write')
   })
 })

@@ -3,6 +3,7 @@ import {
   MCP_SCOPE_DIAGNOSTICS_READ,
   MCP_SCOPE_DISCOVER,
   MCP_SCOPE_FAILURES_READ,
+  MCP_SCOPE_FAILURES_WRITE,
   MCP_SCOPE_JOBS_READ,
   MCP_SCOPE_LOGS_READ,
 } from './mcp-scope-labels'
@@ -45,6 +46,10 @@ export const MCP_SCOPE_LABELS: Record<string, { title: string; description: stri
     title: 'Read failures',
     description: 'View alert and failure events.',
   },
+  [MCP_SCOPE_FAILURES_WRITE]: {
+    title: 'Resolve failures',
+    description: 'Mark alert and failure events as resolved.',
+  },
   [MCP_SCOPE_DIAGNOSTICS_READ]: {
     title: 'Read diagnostics',
     description: 'View queue metrics and failure explanations.',
@@ -86,9 +91,7 @@ export interface McpOAuthConsentSearch {
   scope?: string
 }
 
-export function parseMcpOAuthConsentSearch(
-  search: Record<string, unknown>
-): McpOAuthConsentSearch {
+export function parseMcpOAuthConsentSearch(search: Record<string, unknown>): McpOAuthConsentSearch {
   return {
     consent_code:
       typeof search.consent_code === 'string' && search.consent_code.length > 0
@@ -98,8 +101,7 @@ export function parseMcpOAuthConsentSearch(
       typeof search.client_id === 'string' && search.client_id.length > 0
         ? search.client_id
         : undefined,
-    scope:
-      typeof search.scope === 'string' && search.scope.length > 0 ? search.scope : undefined,
+    scope: typeof search.scope === 'string' && search.scope.length > 0 ? search.scope : undefined,
   }
 }
 

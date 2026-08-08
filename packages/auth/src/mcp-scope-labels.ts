@@ -3,6 +3,7 @@ export const MCP_SCOPE_DISCOVER = 'mcp:discover'
 export const MCP_SCOPE_JOBS_READ = 'mcp:jobs:read'
 export const MCP_SCOPE_LOGS_READ = 'mcp:logs:read'
 export const MCP_SCOPE_FAILURES_READ = 'mcp:failures:read'
+export const MCP_SCOPE_FAILURES_WRITE = 'mcp:failures:write'
 export const MCP_SCOPE_DIAGNOSTICS_READ = 'mcp:diagnostics:read'
 
 export const MCP_PHASE1_SCOPES = [
@@ -10,6 +11,7 @@ export const MCP_PHASE1_SCOPES = [
   MCP_SCOPE_JOBS_READ,
   MCP_SCOPE_LOGS_READ,
   MCP_SCOPE_FAILURES_READ,
+  MCP_SCOPE_FAILURES_WRITE,
   MCP_SCOPE_DIAGNOSTICS_READ,
 ] as const
 

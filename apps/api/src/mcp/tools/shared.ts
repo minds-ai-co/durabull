@@ -38,7 +38,10 @@ export function encodeCursor(offset: number): string {
   return String(offset)
 }
 
-export function parseOffsetPageSize(cursor: string | undefined, pageSize: number): {
+export function parseOffsetPageSize(
+  cursor: string | undefined,
+  pageSize: number
+): {
   offset: number
   limit: number
 } {

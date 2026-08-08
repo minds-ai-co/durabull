@@ -794,10 +794,10 @@ describe('alert monitor', () => {
       firedAt: new Date(Date.now() - 10 * 60_000),
     })
 
-    const resolved = await __alertMonitorTestUtils.autoResolveCompletedJobEvents(
-      testConnectionId,
-      [completedJobEvent, stillFailedJobEvent]
-    )
+    const resolved = await __alertMonitorTestUtils.autoResolveCompletedJobEvents(testConnectionId, [
+      completedJobEvent,
+      stillFailedJobEvent,
+    ])
 
     expect(resolved).toHaveLength(1)
     expect(resolved[0]?.id).toBe(completedJobEvent.id)

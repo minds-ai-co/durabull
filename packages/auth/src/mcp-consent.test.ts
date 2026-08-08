@@ -23,9 +23,16 @@ describe('mcp-consent helpers', () => {
   })
 
   it('labels MCP scopes for the consent screen', () => {
-    const labels = labelConsentScopes(parseConsentScopeList('mcp:discover mcp:jobs:read'))
-    expect(labels.map((entry) => entry.scope)).toEqual(['mcp:discover', 'mcp:jobs:read'])
+    const labels = labelConsentScopes(
+      parseConsentScopeList('mcp:discover mcp:jobs:read mcp:failures:write')
+    )
+    expect(labels.map((entry) => entry.scope)).toEqual([
+      'mcp:discover',
+      'mcp:jobs:read',
+      'mcp:failures:write',
+    ])
     expect(labels[0]?.title).toBe('MCP discovery')
+    expect(labels[2]?.title).toBe('Resolve failures')
   })
 
   it('builds authorize resume URLs with consent prompt', () => {

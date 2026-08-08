@@ -1,8 +1,5 @@
 import { alertEventRepository } from '@durabull/dal'
-import type {
-  GetFailureEventsHandlerInput,
-  GetFailureEventsHandlerOutput,
-} from '@durabull/mcp'
+import type { GetFailureEventsHandlerInput, GetFailureEventsHandlerOutput } from '@durabull/mcp'
 
 import { parseOffsetPageSize, requireConnectionForPrincipal } from './shared'
 import { toMcpAlertEventSummary } from './mcp-sanitize'

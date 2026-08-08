@@ -507,10 +507,7 @@ async function sendDestinationAlert(
     throw new NonRetryableDeliveryError('Destination delivery is missing its destination id.')
   }
 
-  const destination = await alertDestinationRepository.findById(
-    destinationId,
-    event.organizationId
-  )
+  const destination = await alertDestinationRepository.findById(destinationId, event.organizationId)
   if (!destination) {
     throw new NonRetryableDeliveryError('Notification destination no longer exists.')
   }
@@ -755,7 +752,11 @@ function getJobContext(context: unknown): {
   }
 }
 
-function buildLinearIssueTitle(event: AlertEvent, ruleName: string, jobName: string | null): string {
+function buildLinearIssueTitle(
+  event: AlertEvent,
+  ruleName: string,
+  jobName: string | null
+): string {
   // Linear issue titles are plain text, not markdown — never escape them.
   // The connection name is omitted: it's in the description and only crowds the title.
   if (event.type === 'job_failed') {

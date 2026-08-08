@@ -6,7 +6,11 @@ import type { Context } from 'hono'
 import { createMiddleware } from 'hono/factory'
 
 import { hashMcpToolInput, writeMcpAuditEventNonBlocking } from '../audit/mcp-audit'
-import { isMcpToolsCallMethod, parseMcpJsonRpcPayloadId, parseMcpToolCallBody } from '../json-rpc-tool-call'
+import {
+  isMcpToolsCallMethod,
+  parseMcpJsonRpcPayloadId,
+  parseMcpToolCallBody,
+} from '../json-rpc-tool-call'
 
 interface RateLimitEntry {
   count: number
@@ -118,7 +122,10 @@ async function readMcpRequestBody(c: Context): Promise<unknown> {
     return cached
   }
 
-  const body = await c.req.raw.clone().json().catch(() => null)
+  const body = await c.req.raw
+    .clone()
+    .json()
+    .catch(() => null)
   c.set('mcpRequestJsonBody', body)
   return body
 }
