@@ -323,16 +323,16 @@ jobs:
                 "$base_url/mcp"
               list_queues_json="$RUNNER_TEMP/durabull-mcp-list-queues-${connection_name}.json"
               sed -n 's/^data: //p' "$list_queues_body" | tail -n 1 > "$list_queues_json"
-              if jq -e '
-                .result.isError != true and
-                (.result.content[0].text | fromjson) as $payload and
+            if jq -e '
+              .result.isError != true and
+              ((.result.content[0].text | fromjson) as $payload |
                 $payload.total >= 1 and
                 ($payload.queues | length) >= 1 and
                 all($payload.queues[];
                   (.name | type == "string" and length >= 1) and
                   (.jobCounts | type == "object")
-                )
-              ' "$list_queues_json" >/dev/null; then
+                ))
+            ' "$list_queues_json" >/dev/null; then
                 queues_ready=true
                 break
               fi
