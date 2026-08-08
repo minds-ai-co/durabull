@@ -160,6 +160,55 @@ test.describe('Jobs', () => {
     }
   })
 
+  test('groups jobs by processor and can switch to the timeline', async ({ page }) => {
+    await ensureActiveOrg(page)
+    const connectionId = await getDefaultConnectionId(page)
+    const queueName = await getTestQueueName(page, connectionId)
+    const createdJobs: string[] = []
+
+    try {
+      const token = `e2e-processor-${Date.now()}`
+      const processorNames = [`${token}-alpha`, `${token}-beta`]
+
+      for (const name of processorNames) {
+        const jobId = await createJob(page, {
+          connectionId,
+          queueName,
+          name,
+          data: { e2e: true, processor: name },
+          delay: 10 * 60 * 1000,
+        })
+        createdJobs.push(jobId)
+      }
+
+      await page.goto(`/${TEST_ORG_SLUG}/c/${connectionId}/queues/${queueName}`)
+      const processorSearch = page.getByLabel('Search jobs by processor')
+      await expect(processorSearch).toBeVisible({ timeout: 15000 })
+      await processorSearch.fill(token)
+
+      for (const name of processorNames) {
+        await expect(page.getByTestId(`processor-group-${name}`)).toBeVisible({ timeout: 15000 })
+      }
+
+      await expect(page.getByRole('button', { name: 'By processor' })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      )
+      await page.getByRole('button', { name: 'Timeline' }).click()
+
+      await expect(page.getByRole('button', { name: 'Timeline' })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      )
+      await expect(page.getByTestId(`processor-group-${processorNames[0]}`)).toHaveCount(0)
+      for (const jobId of createdJobs) {
+        await expect(page.getByTestId(`job-row-${jobId}`)).toBeVisible()
+      }
+    } finally {
+      await safeRemoveJobs(page, { connectionId, queueName, jobIds: createdJobs })
+    }
+  })
+
   test('invoke promotes a delayed job', async ({ page }) => {
     await ensureActiveOrg(page)
     const connectionId = await getDefaultConnectionId(page)
