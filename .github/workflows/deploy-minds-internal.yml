@@ -1,6 +1,12 @@
 name: Deploy Minds internal Durabull
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - deploy/**
+      - .github/workflows/deploy-minds-internal.yml
   workflow_dispatch:
 
 permissions:
