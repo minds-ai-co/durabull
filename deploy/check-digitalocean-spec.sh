@@ -26,7 +26,7 @@ jq -e '
   (.services[] | select(.name == "durabull") | (.http_port | not)) and
   (.services[] | select(.name == "durabull") | .internal_ports == [3000]) and
   (.workers[] | select(.name == "cloudflared") | (.http_port | not)) and
-  (.workers[] | select(.name == "cloudflared") | .run_command == "cloudflared tunnel --no-autoupdate run") and
+  (.workers[] | select(.name == "cloudflared") | .run_command == "cloudflared tunnel --protocol http2 --no-autoupdate run") and
   (.services[] | select(.name == "durabull") | .image.tag == "v1.17.0") and
   (.workers[] | select(.name == "cloudflared") | .image.tag == "2026.7.2") and
   ([.services[].envs[] | select(.key == "DURABULL_REDIS_URL_PRODUCTION")] | length) == 1 and
