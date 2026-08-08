@@ -20,6 +20,7 @@ import { MCP_PROTOCOL_VERSION } from '@durabull/mcp'
 import { MCP_JSON_RPC_VERSION, mcpHeaders, parseSseJson, postMcpJson } from '@durabull/mcp/testing'
 import type { Hono } from 'hono'
 import { createApiApp } from '../app'
+import { resetAuthlessStateForTests } from '../lib/authless'
 import { DEFAULT_AUTHLESS_MCP_BEARER_TOKEN } from './auth/mcp-auth-config'
 
 const mutableEnv = env as {
@@ -52,11 +53,13 @@ describe('api MCP ingress', () => {
     process.env.DURABULL_REDIS_URL_ENCRYPTION_KEY = TEST_REDIS_ENCRYPTION_KEY
     mutableEnv.DURABULL_REDIS_URL_ENCRYPTION_KEY = TEST_REDIS_ENCRYPTION_KEY
     await closeDb()
+    resetAuthlessStateForTests()
     ;({ app } = await createApiApp({ enableLogging: false }))
   })
 
   afterEach(async () => {
     await closeDb()
+    resetAuthlessStateForTests()
     mutableEnv.APP_BASE_URL = originalAppBaseUrl
     mutableEnv.DURABULL_AUTHLESS = originalAuthless
 
@@ -294,6 +297,31 @@ describe('api MCP ingress', () => {
       connections?: unknown[]
     }
     expect(connectionsResult.connections).toBeDefined()
+  })
+
+  it('bootstraps the authless organization before the first MCP request', async () => {
+    const initResponse = await postMcp({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'authless-bootstrap-test', version: '1.0.0' },
+      },
+    })
+
+    expect(initResponse.status).toBe(200)
+
+    const db = await getDb()
+    const memberships = await db.select().from(member)
+    expect(memberships).toContainEqual(
+      expect.objectContaining({
+        organizationId: 'authless-org',
+        userId: 'authless-user',
+        role: 'owner',
+      })
+    )
   })
 
   it('returns 401 for expired OAuth access tokens', async () => {

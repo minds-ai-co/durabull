@@ -12,7 +12,7 @@ import {
 } from '@durabull/mcp/auth'
 import { createMiddleware } from 'hono/factory'
 
-import { isAuthlessMode } from '../../lib/authless'
+import { ensureAuthlessDefaults, isAuthlessMode } from '../../lib/authless'
 import { recordMcpTelemetry } from '../observability/mcp-telemetry'
 import { getAuthlessMcpBearerToken, getMcpAuthConfig } from './mcp-auth-config'
 import { resolveMcpSessionFromAccessToken } from './resolve-mcp-session'
@@ -67,6 +67,7 @@ export async function createMcpSessionMiddleware(appBaseUrl: string) {
           : buildMcpMissingBearerResponse(resourceMetadataUrl)
       }
 
+      await ensureAuthlessDefaults()
       c.set('mcpSession', buildAuthlessMcpSession(token))
       return next()
     })
