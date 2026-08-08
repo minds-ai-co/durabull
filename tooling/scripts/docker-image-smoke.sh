@@ -84,8 +84,6 @@ if [[ -n "${DURABULL_EXPECTED_RELEASE_CHANNEL:-}" ]]; then
     "${APP_BASE_URL}/api/app/version" \
     "\"releaseChannel\":\"${DURABULL_EXPECTED_RELEASE_CHANNEL}\""
 fi
-assert_json_contains "${APP_BASE_URL}/api/auth/get-session" '"id":"authless-user"'
-
 initialize_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"durabull-image-smoke","version":"1.0.0"}}}'
 initialize_headers="$MCP_TMP_DIR/initialize.headers"
 initialize_body="$MCP_TMP_DIR/initialize.body"
@@ -168,3 +166,7 @@ if ! jq -e '
 fi
 
 echo "Docker image health, build metadata, 13 MCP tool annotations, and MCP domain call passed."
+
+# Keep this after the MCP checks so the smoke proves a fresh MCP request can
+# bootstrap authless persistence without relying on an earlier web/API session.
+assert_json_contains "${APP_BASE_URL}/api/auth/get-session" '"id":"authless-user"'
