@@ -28,6 +28,25 @@ jq -e '
   (.services[] | select(.name == "durabull") | .internal_ports == [3000]) and
   (.workers[] | select(.name == "cloudflared") | (.http_port | not)) and
   (.workers[] | select(.name == "cloudflared") | .run_command == "cloudflared tunnel --protocol http2 --no-autoupdate run") and
+
+  # A single replica of either component is a hostname-wide outage: cloudflared
+  # proxies to http://durabull:3000, so one restarting durabull container means
+  # zero origins and Cloudflare answers 502, and one restarting connector means
+  # the tunnel has nobody registered at all. Two of each is what makes a normal
+  # restart invisible from the edge — do not lower these to save a few euros.
+  (.services[] | select(.name == "durabull") | .instance_count >= 2) and
+  (.workers[] | select(.name == "cloudflared") | .instance_count >= 2) and
+
+  # Boot to serving is ~17s (container start -> "Database migrations applied").
+  # A 45s initial delay held a restarted replica out of rotation for over twice
+  # as long as it needed, which is pure added outage while count was 1.
+  (.services[] | select(.name == "durabull") | .health_check.initial_delay_seconds <= 20) and
+
+  # The 25 Aug 2026 restart was invisible: no alert fired and the pre-restart
+  # logs were gone by the time anyone looked. These make the next one legible.
+  ([.services[] | select(.name == "durabull") | .alerts[] | select(.rule == "RESTART_COUNT")] | length) == 1 and
+  ([.services[] | select(.name == "durabull") | .alerts[] | select(.rule == "MEM_UTILIZATION")] | length) == 1 and
+  ([.workers[] | select(.name == "cloudflared") | .alerts[] | select(.rule == "RESTART_COUNT")] | length) == 1 and
   (.services[] | select(.name == "durabull") | .image == {
     "registry_type": "DOCR",
     "registry": "training",
