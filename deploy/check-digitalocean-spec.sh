@@ -44,6 +44,15 @@ jq -e '
 
   # The 25 Aug 2026 restart was invisible: no alert fired and the pre-restart
   # logs were gone by the time anyone looked. These make the next one legible.
+  #
+  # `value` must be NON-ZERO. DigitalOcean drops zero-valued thresholds during
+  # serialisation, so `"value": 0` comes back as "value is required for
+  # threshold alerts" and the whole spec fails validation — which is exactly
+  # how the first attempt at this broke. RESTART_COUNT > 1 therefore means
+  # "restarting repeatedly", i.e. a crash loop; a single restart is covered by
+  # running two replicas rather than by paging anyone.
+  ([.services[] | select(.name == "durabull") | .alerts[] | select(.value == 0)] | length) == 0 and
+  ([.workers[] | select(.name == "cloudflared") | .alerts[] | select(.value == 0)] | length) == 0 and
   ([.services[] | select(.name == "durabull") | .alerts[] | select(.rule == "RESTART_COUNT")] | length) == 1 and
   ([.services[] | select(.name == "durabull") | .alerts[] | select(.rule == "MEM_UTILIZATION")] | length) == 1 and
   ([.workers[] | select(.name == "cloudflared") | .alerts[] | select(.rule == "RESTART_COUNT")] | length) == 1 and
