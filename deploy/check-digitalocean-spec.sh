@@ -29,13 +29,21 @@ jq -e '
   (.workers[] | select(.name == "cloudflared") | (.http_port | not)) and
   (.workers[] | select(.name == "cloudflared") | .run_command == "cloudflared tunnel --protocol http2 --no-autoupdate run") and
 
-  # A single replica of either component is a hostname-wide outage: cloudflared
-  # proxies to http://durabull:3000, so one restarting durabull container means
-  # zero origins and Cloudflare answers 502, and one restarting connector means
-  # the tunnel has nobody registered at all. Two of each is what makes a normal
-  # restart invisible from the edge — do not lower these to save a few euros.
+  # A single durabull replica is a hostname-wide outage: cloudflared proxies to
+  # http://durabull:3000, so one restarting container means zero origins and
+  # Cloudflare answers 502. That is the 25 Aug 2026 incident, and two replicas
+  # are what make a normal restart invisible from the edge — do not lower this.
   (.services[] | select(.name == "durabull") | .instance_count >= 2) and
-  (.workers[] | select(.name == "cloudflared") | .instance_count >= 2) and
+
+  # cloudflared stays at ONE, deliberately. A restarting connector would blank
+  # the tunnel the same way, but DigitalOcean caps `apps-s-1vcpu-0.5gb` at a
+  # single instance ("must not exceed 1 instance for instance_size_slug"), so a
+  # second connector means a size bump on BOTH replicas — roughly +$31/month to
+  # insure a failure that has not happened (the connector reported restart_count
+  # 0 across the 72h around the incident; the durabull service did not). The
+  # RESTART_COUNT alert below is what tells us if that ever stops being true.
+  # NOTE: no apostrophes in this block — the whole filter is single-quoted.
+  (.workers[] | select(.name == "cloudflared") | .instance_count == 1) and
 
   # Boot to serving is ~17s (container start -> "Database migrations applied").
   # A 45s initial delay held a restarted replica out of rotation for over twice
