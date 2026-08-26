@@ -128,7 +128,7 @@
         "tag": "2026.7.2"
       },
       "instance_size_slug": "apps-s-1vcpu-0.5gb",
-      "instance_count": 2,
+      "instance_count": 1,
       "alerts": [
         {
           "rule": "RESTART_COUNT",
