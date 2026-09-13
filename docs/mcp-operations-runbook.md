@@ -12,7 +12,7 @@ For GA documentation (release gates, compliance, security closure, validation ev
 
 | Surface | URL | Notes |
 | --- | --- | --- |
-| MCP transport | `{APP_BASE_URL}/mcp` | Streamable HTTP (`GET` / `POST` / `DELETE`) |
+| MCP transport | `{APP_BASE_URL}/mcp` | Streamable HTTP, **stateless**: `POST` only (`GET` / `DELETE` → `405`), no `Mcp-Session-Id` |
 | Protected resource metadata | `GET /.well-known/oauth-protected-resource` | Same origin as API |
 | OAuth (Better Auth) | `/api/auth/mcp/*` | Register, authorize, token |
 | REST API | `{APP_BASE_URL}/api/*` | Unchanged |
@@ -20,6 +20,10 @@ For GA documentation (release gates, compliance, security closure, validation ev
 **Cloud (Durabull):** one web service exposes `/`, `/api/*`, and `/mcp` on the app domain (for example `https://app.durabull.io/mcp`).
 
 **Self-hosted:** publish a single app port (default `3000`). Do not expose a second port for MCP.
+
+**Stateless transport (multi-replica safe):** every `POST /mcp` is served by a fresh MCP server instance that exists only for that HTTP request. `initialize` does not return an `Mcp-Session-Id`, and one still sent by a client is ignored, so any replica can serve any request and a load balancer needs no session affinity. Auth, scopes, and policy are evaluated on every request. Tool results still stream as SSE on the `POST` response.
+
+Not offered, by design: the standalone `GET` SSE stream for server-initiated messages, `DELETE` session termination, and `Last-Event-ID` resumability. No Durabull tool sends server-initiated notifications or requests (tools, annotations, and scopes are static), and resumability was never enabled. MCP SDK clients treat the `405` on `GET`/`DELETE` as "not supported" and continue.
 
 ## Required environment
 
@@ -203,6 +207,8 @@ Full checklist: see [mcp-oauth-operator.md](./mcp-oauth-operator.md). Common cau
 Ingress and per-tool limits are **in-memory per process**. Each replica enforces its own window; adding replicas multiplies effective quota.
 
 **Mitigation:** Terminate TLS at a shared edge limiter with global limits, or plan Redis-backed limits (not shipped in phase 1).
+
+MCP sessions are not a multi-replica concern: the transport is stateless (see [Deployment model](#deployment-model)). A client error such as `Session terminated` / HTTP `404 Session not found` means the client is talking to a pre-stateless build.
 
 ## Key rotation
 

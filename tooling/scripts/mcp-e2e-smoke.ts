@@ -33,7 +33,7 @@ function record(name: string, pass: boolean, detail: string) {
 
 async function mcpPost(
   body: Record<string, unknown>,
-  options: { token?: string; sessionId?: string } = {}
+  options: { token?: string } = {}
 ): Promise<Response> {
   const headers: Record<string, string> = {
     host,
@@ -41,7 +41,6 @@ async function mcpPost(
     'content-type': 'application/json',
   }
   if (options.token) headers.authorization = `Bearer ${options.token}`
-  if (options.sessionId) headers['mcp-session-id'] = options.sessionId
 
   return fetch(`${baseUrl}/mcp`, { method: 'POST', headers, body: JSON.stringify(body) })
 }
@@ -185,51 +184,50 @@ async function main() {
     result?: { serverInfo?: { name?: string } }
   }
   record(
-    'Initialize + session',
-    initRes.ok && !!sessionId && initBody.result?.serverInfo?.name === 'durabull-mcp',
+    'Initialize (stateless, no session id)',
+    initRes.ok && !sessionId && initBody.result?.serverInfo?.name === 'durabull-mcp',
     `HTTP ${initRes.status}, session=${sessionId ?? 'none'}`
   )
 
-  if (sessionId) {
-    await mcpPost(
-      { jsonrpc: MCP_JSON_RPC_VERSION, method: 'notifications/initialized' },
-      { token: validToken, sessionId }
-    )
+  // Stateless transport: every follow-up request stands alone, without Mcp-Session-Id.
+  await mcpPost(
+    { jsonrpc: MCP_JSON_RPC_VERSION, method: 'notifications/initialized' },
+    { token: validToken }
+  )
 
-    const listRes = await mcpPost(
-      { jsonrpc: MCP_JSON_RPC_VERSION, id: 2, method: 'tools/list', params: {} },
-      { token: validToken, sessionId }
-    )
-    const listBody = parseSseJson(await listRes.text()) as {
-      result?: { tools?: Array<{ name: string }> }
-    }
-    const tools = listBody.result?.tools?.map((t) => t.name) ?? []
-    record('tools/list', listRes.ok && tools.includes('ping'), `tools=${tools.join(',') || 'none'}`)
-
-    const callRes = await mcpPost(
-      {
-        jsonrpc: MCP_JSON_RPC_VERSION,
-        id: 3,
-        method: 'tools/call',
-        params: { name: 'ping', arguments: {} },
-      },
-      { token: validToken, sessionId }
-    )
-    const callBody = parseSseJson(await callRes.text()) as {
-      result?: { content?: Array<{ text?: string }> }
-    }
-    record(
-      'tools/call ping',
-      callRes.ok && callBody.result?.content?.[0]?.text === 'pong',
-      `text=${callBody.result?.content?.[0]?.text ?? 'missing'}`
-    )
-
-    const noSessionRes = await mcpPost(
-      { jsonrpc: MCP_JSON_RPC_VERSION, id: 4, method: 'tools/list', params: {} },
-      { token: validToken }
-    )
-    record('Session required', noSessionRes.status === 400, `HTTP ${noSessionRes.status}`)
+  const listRes = await mcpPost(
+    { jsonrpc: MCP_JSON_RPC_VERSION, id: 2, method: 'tools/list', params: {} },
+    { token: validToken }
+  )
+  const listBody = parseSseJson(await listRes.text()) as {
+    result?: { tools?: Array<{ name: string }> }
   }
+  const tools = listBody.result?.tools?.map((t) => t.name) ?? []
+  record('tools/list', listRes.ok && tools.includes('ping'), `tools=${tools.join(',') || 'none'}`)
+
+  const callRes = await mcpPost(
+    {
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'ping', arguments: {} },
+    },
+    { token: validToken }
+  )
+  const callBody = parseSseJson(await callRes.text()) as {
+    result?: { content?: Array<{ text?: string }> }
+  }
+  record(
+    'tools/call ping',
+    callRes.ok && callBody.result?.content?.[0]?.text === 'pong',
+    `text=${callBody.result?.content?.[0]?.text ?? 'missing'}`
+  )
+
+  const getRes = await fetch(`${baseUrl}/mcp`, {
+    method: 'GET',
+    headers: { host, accept: 'text/event-stream', authorization: `Bearer ${validToken}` },
+  })
+  record('GET /mcp not offered (stateless)', getRes.status === 405, `HTTP ${getRes.status}`)
 
   const badHost = await fetch(`${baseUrl}/mcp`, {
     method: 'POST',

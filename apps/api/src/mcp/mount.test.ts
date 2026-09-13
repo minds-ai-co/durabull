@@ -189,26 +189,19 @@ describe('api MCP ingress', () => {
     })
 
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
-    await postMcp(
-      {
-        jsonrpc: MCP_JSON_RPC_VERSION,
-        method: 'notifications/initialized',
-      },
-      { sessionId: sessionId ?? undefined }
-    )
+    await postMcp({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      method: 'notifications/initialized',
+    })
 
-    const listResponse = await postMcp(
-      {
-        jsonrpc: MCP_JSON_RPC_VERSION,
-        id: 2,
-        method: 'tools/list',
-        params: {},
-      },
-      { sessionId: sessionId ?? undefined }
-    )
+    const listResponse = await postMcp({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 2,
+      method: 'tools/list',
+      params: {},
+    })
 
     expect(listResponse.status).toBe(200)
     const listPayload = parseSseJson(await listResponse.text()) as {
@@ -257,18 +250,15 @@ describe('api MCP ingress', () => {
       openWorldHint: false,
     })
 
-    const callResponse = await postMcp(
-      {
-        jsonrpc: MCP_JSON_RPC_VERSION,
-        id: 3,
-        method: 'tools/call',
-        params: {
-          name: 'ping',
-          arguments: {},
-        },
+    const callResponse = await postMcp({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'ping',
+        arguments: {},
       },
-      { sessionId: sessionId ?? undefined }
-    )
+    })
 
     expect(callResponse.status).toBe(200)
     const callPayload = parseSseJson(await callResponse.text()) as {
@@ -276,18 +266,15 @@ describe('api MCP ingress', () => {
     }
     expect(callPayload.result?.content?.[0]?.text).toBe('pong')
 
-    const connectionsResponse = await postMcp(
-      {
-        jsonrpc: MCP_JSON_RPC_VERSION,
-        id: 4,
-        method: 'tools/call',
-        params: {
-          name: 'list_connections',
-          arguments: { pageSize: 10 },
-        },
+    const connectionsResponse = await postMcp({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 4,
+      method: 'tools/call',
+      params: {
+        name: 'list_connections',
+        arguments: { pageSize: 10 },
       },
-      { sessionId: sessionId ?? undefined }
-    )
+    })
     expect(connectionsResponse.status).toBe(200)
     const connectionsPayload = parseSseJson(await connectionsResponse.text()) as {
       result?: { isError?: boolean; content?: Array<{ text?: string }> }
@@ -297,6 +284,123 @@ describe('api MCP ingress', () => {
       connections?: unknown[]
     }
     expect(connectionsResult.connections).toBeDefined()
+  })
+
+  it('serves initialize, tools/list, and ping without a session id on either replica', async () => {
+    const { app: replicaB } = await createApiApp({ enableLogging: false })
+    const postToReplicaB = (body: Parameters<typeof postMcpJson>[2]) =>
+      postMcpJson((path, init) => Promise.resolve(replicaB.request(path, init)), '/mcp', body, {
+        authorization: authlessAuthorization,
+      })
+    const pingCall = (id: number) => ({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id,
+      method: 'tools/call',
+      params: { name: 'ping', arguments: {} },
+    })
+    const expectPong = async (response: Response, id: number) => {
+      expect(response.status).toBe(200)
+      expect(response.headers.get('mcp-session-id')).toBeNull()
+      const payload = parseSseJson(await response.text()) as {
+        id?: number
+        result?: { content?: Array<{ text?: string }> }
+      }
+      expect(payload.id).toBe(id)
+      expect(payload.result?.content?.[0]?.text).toBe('pong')
+    }
+
+    const initResponse = await postMcp({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'stateless-replica-test', version: '1.0.0' },
+      },
+    })
+    expect(initResponse.status).toBe(200)
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
+
+    const listResponse = await postToReplicaB({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 2,
+      method: 'tools/list',
+      params: {},
+    })
+    expect(listResponse.status).toBe(200)
+    const listPayload = parseSseJson(await listResponse.text()) as {
+      result?: { tools?: Array<{ name: string }> }
+    }
+    expect(listPayload.result?.tools).toHaveLength(13)
+
+    await expectPong(await postToReplicaB(pingCall(3)), 3)
+    await expectPong(await postMcp(pingCall(4)), 4)
+  })
+
+  it('enforces the bearer on every session-less request, not only initialize', async () => {
+    const pingCall = {
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'ping', arguments: {} },
+    }
+
+    const authorized = await postMcp(pingCall)
+    expect(authorized.status).toBe(200)
+
+    const missingBearer = await postMcp(pingCall, { authorization: undefined })
+    expect(missingBearer.status).toBe(401)
+    expect(missingBearer.headers.get('WWW-Authenticate')).toContain(resourceMetadataUrl)
+
+    const invalidBearer = await postMcp(pingCall, { authorization: 'Bearer not-a-real-token' })
+    expect(invalidBearer.status).toBe(401)
+  })
+
+  it('grants the authless bearer mcp:failures:write on a session-less resolve_alert_event call', async () => {
+    const initResponse = await postMcp({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'authless-scope-test', version: '1.0.0' },
+      },
+    })
+    expect(initResponse.status).toBe(200)
+
+    const connection = await redisConnectionRepository.create({
+      name: 'Authless Scope Connection',
+      url: 'redis://localhost:6379/6',
+      isDefault: true,
+      environment: 'development',
+      prefix: 'bull',
+      allowSelfSignedCerts: false,
+      organizationId: 'authless-org',
+    })
+
+    const response = await postMcp({
+      jsonrpc: MCP_JSON_RPC_VERSION,
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'resolve_alert_event',
+        arguments: { connectionId: connection.id, eventId: crypto.randomUUID() },
+      },
+    })
+
+    const body = await response.text()
+    expect(response.status).toBe(200)
+    expect(body).not.toContain('insufficient_scope')
+    const payload = parseSseJson(body) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> }
+    }
+    expect(payload.result?.isError).toBe(true)
+    const errorPayload = JSON.parse(payload.result?.content?.[0]?.text ?? '{}') as {
+      error?: { code?: string }
+    }
+    expect(errorPayload.error?.code).toBe('not_found')
   })
 
   it('bootstraps the authless organization before the first MCP request', async () => {
@@ -487,8 +591,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const response = await postMcp(
       {
@@ -502,7 +605,7 @@ describe('api MCP ingress', () => {
           },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
 
     expect(response.status).toBe(403)
@@ -602,8 +705,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const response = await postMcp(
       {
@@ -620,7 +722,7 @@ describe('api MCP ingress', () => {
           },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
 
     expect(response.status).toBe(403)
@@ -720,8 +822,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const response = await postMcp(
       {
@@ -736,7 +837,7 @@ describe('api MCP ingress', () => {
           },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
 
     expect(response.status).toBe(403)
@@ -836,8 +937,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const response = await postMcp(
       {
@@ -853,7 +953,7 @@ describe('api MCP ingress', () => {
           },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
 
     expect(response.status).toBe(403)
@@ -934,8 +1034,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const callResponse = await postMcp(
       {
@@ -947,7 +1046,7 @@ describe('api MCP ingress', () => {
           arguments: {},
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
     expect(callResponse.status).toBe(403)
   })
@@ -1030,8 +1129,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const callResponse = await postMcp(
       {
@@ -1043,7 +1141,7 @@ describe('api MCP ingress', () => {
           arguments: { pageSize: 10 },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
 
     expect(callResponse.status).toBe(403)
@@ -1132,8 +1230,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const callResponse = await postMcp(
       {
@@ -1145,7 +1242,7 @@ describe('api MCP ingress', () => {
           arguments: {},
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
 
     expect(callResponse.status).toBe(200)
@@ -1236,8 +1333,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const callResponse = await postMcp(
       {
@@ -1253,7 +1349,7 @@ describe('api MCP ingress', () => {
           },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
 
     expect(callResponse.status).toBe(403)
@@ -1363,8 +1459,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const callResponse = await postMcp(
       {
@@ -1378,7 +1473,7 @@ describe('api MCP ingress', () => {
           },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
     expect(callResponse.status).toBe(403)
   })
@@ -1486,8 +1581,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const firstCall = await postMcp(
       {
@@ -1501,7 +1595,7 @@ describe('api MCP ingress', () => {
           },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
     expect(firstCall.status).toBe(200)
     const firstPayload = parseSseJson(await firstCall.text()) as {
@@ -1527,7 +1621,7 @@ describe('api MCP ingress', () => {
           },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
     expect(secondCall.status).toBe(200)
     const secondPayload = parseSseJson(await secondCall.text()) as {
@@ -1629,8 +1723,7 @@ describe('api MCP ingress', () => {
       { authorization: `Bearer ${token}` }
     )
     expect(initResponse.status).toBe(200)
-    const sessionId = initResponse.headers.get('mcp-session-id')
-    expect(sessionId).toBeTruthy()
+    expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
     const callResponse = await postMcp(
       {
@@ -1642,7 +1735,7 @@ describe('api MCP ingress', () => {
           arguments: { pageSize: 10 },
         },
       },
-      { authorization: `Bearer ${token}`, sessionId: sessionId ?? undefined }
+      { authorization: `Bearer ${token}` }
     )
     expect(callResponse.status).toBe(200)
     const payload = parseSseJson(await callResponse.text()) as {
@@ -1665,6 +1758,6 @@ describe('api MCP ingress', () => {
     })
 
     expect(response.headers.get('content-type')).not.toContain('text/html')
-    expect(response.status).toBe(400)
+    expect(response.status).toBe(405)
   })
 })
