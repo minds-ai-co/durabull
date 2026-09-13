@@ -99,15 +99,10 @@ curl --silent --show-error --fail \
   "${APP_BASE_URL}/mcp"
 grep -F '"serverInfo"' "$initialize_body" >/dev/null
 
-mcp_session_id="$(awk '
-  BEGIN { IGNORECASE=1 }
-  /^mcp-session-id:/ {
-    gsub(/\r/, "", $2)
-    print $2
-  }
-' "$initialize_headers" | tail -n 1)"
-if [[ -z "$mcp_session_id" ]]; then
-  echo "MCP initialize returned no session ID" >&2
+# /mcp is stateless so any replica can serve any request: no session is issued
+# and the follow-up calls below deliberately send none.
+if grep -qi '^mcp-session-id:' "$initialize_headers"; then
+  echo "MCP initialize returned an Mcp-Session-Id; /mcp must be stateless" >&2
   exit 1
 fi
 
@@ -117,7 +112,6 @@ curl --silent --show-error --fail \
   --output "$tools_body" \
   --header "Authorization: Bearer ${MCP_AUTHLESS_BEARER_TOKEN}" \
   --header "Origin: ${APP_BASE_URL}" \
-  --header "Mcp-Session-Id: ${mcp_session_id}" \
   --header 'Accept: application/json, text/event-stream' \
   --header 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
@@ -151,7 +145,6 @@ curl --silent --show-error --fail \
   --output "$connections_body" \
   --header "Authorization: Bearer ${MCP_AUTHLESS_BEARER_TOKEN}" \
   --header "Origin: ${APP_BASE_URL}" \
-  --header "Mcp-Session-Id: ${mcp_session_id}" \
   --header 'Accept: application/json, text/event-stream' \
   --header 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_connections","arguments":{"pageSize":10}}}' \
@@ -176,7 +169,6 @@ curl --silent --show-error --fail \
   --output "$queues_body" \
   --header "Authorization: Bearer ${MCP_AUTHLESS_BEARER_TOKEN}" \
   --header "Origin: ${APP_BASE_URL}" \
-  --header "Mcp-Session-Id: ${mcp_session_id}" \
   --header 'Accept: application/json, text/event-stream' \
   --header 'Content-Type: application/json' \
   --data "$queues_payload" \

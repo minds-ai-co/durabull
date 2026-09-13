@@ -151,8 +151,8 @@ async function mcpPingWithToken(accessToken: string) {
 
   const initText = await initResponse.text()
   expect(initResponse.status, `initialize failed: ${initResponse.status} ${initText}`).toBe(200)
-  const sessionId = initResponse.headers.get('mcp-session-id')
-  expect(sessionId).toBeTruthy()
+  // Stateless transport: no session is issued, follow-up requests stand alone.
+  expect(initResponse.headers.get('mcp-session-id')).toBeNull()
 
   const initBody = parseSseJson(initText) as {
     result?: { serverInfo?: { name?: string } }
@@ -166,7 +166,6 @@ async function mcpPingWithToken(accessToken: string) {
       accept: 'application/json, text/event-stream',
       'content-type': 'application/json',
       authorization: `Bearer ${accessToken}`,
-      'mcp-session-id': sessionId as string,
     },
     body: JSON.stringify({
       jsonrpc: MCP_JSON_RPC_VERSION,
@@ -181,7 +180,6 @@ async function mcpPingWithToken(accessToken: string) {
       accept: 'application/json, text/event-stream',
       'content-type': 'application/json',
       authorization: `Bearer ${accessToken}`,
-      'mcp-session-id': sessionId as string,
     },
     body: JSON.stringify({
       jsonrpc: MCP_JSON_RPC_VERSION,

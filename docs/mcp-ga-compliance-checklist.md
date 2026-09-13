@@ -9,8 +9,8 @@
 
 | Requirement | Status | Evidence |
 | --- | --- | --- |
-| `GET` / `POST` / `DELETE` on `/mcp` | Done | [validation evidence](./mcp-ga-validation-evidence.md) |
-| MCP `initialize` + session handling | Done | `apps/api/src/mcp/mount.test.ts` |
+| `POST` on `/mcp` (stateless; `GET` / `DELETE` → `405`) | Done | `packages/mcp/src/routes.test.ts` |
+| MCP `initialize` + stateless requests (no `Mcp-Session-Id`, any replica) | Done | `packages/mcp/src/routes.test.ts`, `apps/api/src/mcp/mount.test.ts` |
 | Host header validation | Done | `packages/mcp` allowed-hosts tests + `mount.test.ts` |
 | `/mcp` not captured by SPA static fallback | Done | `apps/api/src/mcp/mount.test.ts` |
 | Request size limits (API app) | Done | `packages/mcp/src/routes.ts` — 1MB body limit |

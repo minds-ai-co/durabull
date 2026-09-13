@@ -7,7 +7,7 @@ import type { McpRequestContext } from './request-context'
 
 import { createHostValidationMiddleware } from './middleware/host-validation'
 import type { RegisterReadToolsOptions } from './tools/register-read-tools'
-import { createMcpSessionRegistry } from './transport/session-registry'
+import { createStatelessMcpHandler } from './transport/stateless-transport'
 
 export interface CreateMcpRoutesOptions {
   /** App version reported in MCP server metadata. */
@@ -29,7 +29,7 @@ export interface CreateMcpRoutesOptions {
 }
 
 export function createMcpRoutes(options: CreateMcpRoutesOptions): Hono {
-  const registry = createMcpSessionRegistry({
+  const mcpHandler = createStatelessMcpHandler({
     version: options.version,
     allowedHosts: options.allowedHosts,
     serverOptions: { readTools: options.readTools },
@@ -74,8 +74,9 @@ export function createMcpRoutes(options: CreateMcpRoutesOptions): Hono {
     routes.use('*', middleware)
   }
 
-  // GET / POST / DELETE delegated to Streamable HTTP transport (@hono/mcp).
-  routes.all('/', async (c) => registry.handleRequest(c, options.requestContextResolver?.(c)))
+  // Stateless Streamable HTTP (@hono/mcp): POST is served by a per-request server, so any replica
+  // can serve any request; GET / DELETE (and other methods) answer 405 after auth has run.
+  routes.all('/', async (c) => mcpHandler.handleRequest(c, options.requestContextResolver?.(c)))
 
   return routes
 }

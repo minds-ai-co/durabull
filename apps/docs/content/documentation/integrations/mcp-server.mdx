@@ -75,7 +75,7 @@ Delegated users receive scopes from OAuth consent. Service accounts require expl
 Authenticated callers still receive:
 
 - **Output redaction** — sensitive keys and inline secrets stripped; `_mcpSafety.redactionCount` when redactions occur
-- **Rate limits** (when `NODE_ENV=production`) — 120 HTTP requests/min on `/mcp` ingress (initialize, session, and tool RPCs); **60 calls/min per tool** per bearer (30/min for `get_job_logs`, `get_job_stacktraces`, `get_failure_events`, `get_queue_metrics`, `explain_job_failure`)
+- **Rate limits** (when `NODE_ENV=production`) — 120 HTTP requests/min on `/mcp` ingress (every JSON-RPC request, including initialize and tool calls); **60 calls/min per tool** per bearer (30/min for `get_job_logs`, `get_job_stacktraces`, `get_failure_events`, `get_queue_metrics`, `explain_job_failure`)
 - **Audit** — best-effort `mcp_audit_event` rows for tool calls (may drop under backpressure; see runbook)
 
 Operators: telemetry signals, SQL examples, and incident playbooks are in the [MCP operations runbook](https://github.com/durabullhq/durabull/blob/main/docs/mcp-operations-runbook.md).

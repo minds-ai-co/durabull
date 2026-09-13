@@ -226,15 +226,56 @@ jobs:
             exit 1
           fi
 
-          mcp_session_id=$(awk '
-            BEGIN { IGNORECASE=1 }
-            /^mcp-session-id:/ {
-              gsub(/\r/, "", $2)
-              print $2
-            }
-          ' "$mcp_headers" | tail -n 1)
-          if [ -z "$mcp_session_id" ]; then
-            echo "::error::Authenticated MCP initialize returned no session ID"
+          # /mcp is stateless: cloudflared spreads requests across both durabull
+          # replicas without affinity, so no request may depend on a session.
+          # initialize must not issue an Mcp-Session-Id and six consecutive
+          # session-less pings must all succeed. Retried so a replica from the
+          # previous deployment that is still draining cannot fail the check.
+          stateless_headers="$RUNNER_TEMP/durabull-mcp-stateless-initialize.headers"
+          ping_body="$RUNNER_TEMP/durabull-mcp-ping.txt"
+          ping_payload='{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"ping","arguments":{}}}'
+          stateless_ok=false
+          for attempt in $(seq 1 12); do
+            stateless_ok=true
+            if ! curl -fsS \
+              --max-time 20 \
+              -D "$stateless_headers" \
+              -o /dev/null \
+              "${access_headers[@]}" \
+              -H "Origin: $base_url" \
+              -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
+              -H 'Accept: application/json, text/event-stream' \
+              -H 'Content-Type: application/json' \
+              --data "$initialize_payload" \
+              "$base_url/mcp" \
+              || grep -qi '^mcp-session-id:' "$stateless_headers"; then
+              stateless_ok=false
+            fi
+            for ping_attempt in 1 2 3 4 5 6; do
+              [ "$stateless_ok" = "true" ] || break
+              if ! curl -fsS \
+                --max-time 20 \
+                -o "$ping_body" \
+                "${access_headers[@]}" \
+                -H "Origin: $base_url" \
+                -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
+                -H 'Accept: application/json, text/event-stream' \
+                -H 'Content-Type: application/json' \
+                --data "$ping_payload" \
+                "$base_url/mcp" \
+                || ! sed -n 's/^data: //p' "$ping_body" | tail -n 1 \
+                  | jq -e '.result.content[0].text == "pong"' >/dev/null; then
+                stateless_ok=false
+              fi
+            done
+            if [ "$stateless_ok" = "true" ]; then
+              break
+            fi
+            echo "Stateless MCP check attempt ${attempt}/12 not ready"
+            sleep 5
+          done
+          if [ "$stateless_ok" != "true" ]; then
+            echo "::error::/mcp is not stateless across replicas: initialize returned an Mcp-Session-Id or a session-less ping failed"
             exit 1
           fi
 
@@ -246,7 +287,6 @@ jobs:
             "${access_headers[@]}" \
             -H "Origin: $base_url" \
             -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
-            -H "Mcp-Session-Id: $mcp_session_id" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             --data "$tools_payload" \
@@ -285,7 +325,6 @@ jobs:
             "${access_headers[@]}" \
             -H "Origin: $base_url" \
             -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
-            -H "Mcp-Session-Id: $mcp_session_id" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             --data "$list_connections_payload" \
@@ -312,7 +351,6 @@ jobs:
             "${access_headers[@]}" \
             -H "Origin: $base_url" \
             -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
-            -H "Mcp-Session-Id: $mcp_session_id" \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Content-Type: application/json' \
             --data "$workers_payload" \
@@ -349,7 +387,6 @@ jobs:
                 "${access_headers[@]}" \
                 -H "Origin: $base_url" \
                 -H "Authorization: Bearer ${DURABULL_MCP_AUTHLESS_BEARER}" \
-                -H "Mcp-Session-Id: $mcp_session_id" \
                 -H 'Accept: application/json, text/event-stream' \
                 -H 'Content-Type: application/json' \
                 --data "$list_queues_payload" \
@@ -390,7 +427,7 @@ jobs:
                 .image.tag == $build_id
               ' >/dev/null
 
-          echo "Cloudflare path isolation, immutable image, processor-component topology, 13 MCP tool annotations, Production/Staging connections, and live Redis queue reads through MCP: ok"
+          echo "Cloudflare path isolation, immutable image, stateless MCP across replicas, processor-component topology, 13 MCP tool annotations, Production/Staging connections, and live Redis queue reads through MCP: ok"
 
       - name: Record deployment boundary
         run: |

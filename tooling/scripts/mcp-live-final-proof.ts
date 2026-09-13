@@ -41,7 +41,7 @@ function parseJsonRpcText(text: string) {
 async function mcpPost(
   baseUrl: string,
   body: Record<string, unknown>,
-  options: { token: string; sessionId?: string }
+  options: { token: string }
 ) {
   const host = new URL(baseUrl).host
   const headers: Record<string, string> = {
@@ -50,7 +50,6 @@ async function mcpPost(
     'content-type': 'application/json',
     authorization: `Bearer ${options.token}`,
   }
-  if (options.sessionId) headers['mcp-session-id'] = options.sessionId
 
   return fetch(`${baseUrl}/mcp`, {
     method: 'POST',
@@ -75,6 +74,7 @@ async function initialize(baseUrl: string, token: string) {
     { token }
   )
   const body = parseJsonRpcText(await res.text())
+  // Stateless transport: initialize must not issue a session id.
   const sessionId = res.headers.get('mcp-session-id') ?? undefined
   return { res, body, sessionId }
 }
@@ -82,7 +82,6 @@ async function initialize(baseUrl: string, token: string) {
 async function callTool(
   baseUrl: string,
   token: string,
-  sessionId: string,
   name: string,
   args: Record<string, unknown>
 ) {
@@ -94,7 +93,7 @@ async function callTool(
       method: 'tools/call',
       params: { name, arguments: args },
     },
-    { token, sessionId }
+    { token }
   )
   const raw = await res.text()
   return { res, body: parseJsonRpcText(raw), raw }
@@ -395,39 +394,39 @@ async function main() {
   const delegatedInit = await initialize(baseUrl, delegatedFullToken)
   add(
     'Delegated initialize',
-    delegatedInit.res.ok && !!delegatedInit.sessionId,
+    delegatedInit.res.ok && !delegatedInit.sessionId,
     `status=${delegatedInit.res.status}, session=${delegatedInit.sessionId ?? 'none'}`
   )
-  if (!delegatedInit.sessionId) throw new Error('Delegated init failed')
+  if (!delegatedInit.res.ok || delegatedInit.sessionId) throw new Error('Delegated init failed')
 
   const serviceInit = await initialize(baseUrl, serviceToken)
   add(
     'Service initialize',
-    serviceInit.res.ok && !!serviceInit.sessionId,
+    serviceInit.res.ok && !serviceInit.sessionId,
     `status=${serviceInit.res.status}, session=${serviceInit.sessionId ?? 'none'}`
   )
-  if (!serviceInit.sessionId) throw new Error('Service init failed')
+  if (!serviceInit.res.ok || serviceInit.sessionId) throw new Error('Service init failed')
 
   const deniedServiceInit = await initialize(baseUrl, deniedServiceToken)
   add(
     'Denied-service initialize',
-    deniedServiceInit.res.ok && !!deniedServiceInit.sessionId,
+    deniedServiceInit.res.ok && !deniedServiceInit.sessionId,
     `status=${deniedServiceInit.res.status}, session=${deniedServiceInit.sessionId ?? 'none'}`
   )
-  if (!deniedServiceInit.sessionId) throw new Error('Denied service init failed')
+  if (!deniedServiceInit.res.ok || deniedServiceInit.sessionId) throw new Error('Denied service init failed')
 
   const lowScopeInit = await initialize(baseUrl, delegatedLowScopeToken)
   add(
     'Low-scope initialize',
-    lowScopeInit.res.ok && !!lowScopeInit.sessionId,
+    lowScopeInit.res.ok && !lowScopeInit.sessionId,
     `status=${lowScopeInit.res.status}, session=${lowScopeInit.sessionId ?? 'none'}`
   )
-  if (!lowScopeInit.sessionId) throw new Error('Low-scope init failed')
+  if (!lowScopeInit.res.ok || lowScopeInit.sessionId) throw new Error('Low-scope init failed')
 
   const toolsList = await mcpPost(
     baseUrl,
     { jsonrpc: MCP_JSON_RPC_VERSION, id: 11, method: 'tools/list', params: {} },
-    { token: delegatedFullToken, sessionId: delegatedInit.sessionId }
+    { token: delegatedFullToken }
   )
   const toolsListBody = parseJsonRpcText(await toolsList.text())
   const toolNames: string[] = toolsListBody?.result?.tools?.map((t: any) => t.name) ?? []
@@ -451,13 +450,12 @@ async function main() {
     `tools=${toolNames.join(',')}`
   )
 
-  const ping = await callTool(baseUrl, delegatedFullToken, delegatedInit.sessionId, 'ping', {})
+  const ping = await callTool(baseUrl, delegatedFullToken, 'ping', {})
   add('ping', ping.res.ok && ping.body?.result?.content?.[0]?.text === 'pong', `status=${ping.res.status}`)
 
   const listConnections = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'list_connections',
     { pageSize: 10 }
   )
@@ -474,7 +472,6 @@ async function main() {
   const listQueues = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'list_queues',
     {
       connectionId: connection.id,
@@ -493,7 +490,6 @@ async function main() {
   const getQueueTool = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'get_queue',
     { connectionId: connection.id, queueName }
   )
@@ -505,7 +501,6 @@ async function main() {
   const listJobs = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'list_jobs',
     { connectionId: connection.id, queueName, pageSize: 20 }
   )
@@ -518,7 +513,7 @@ async function main() {
     `status=${listJobs.res.status}, jobs=${listJobsJson.jobs.length}`
   )
 
-  const getJob = await callTool(baseUrl, delegatedFullToken, delegatedInit.sessionId, 'get_job', {
+  const getJob = await callTool(baseUrl, delegatedFullToken, 'get_job', {
     connectionId: connection.id,
     queueName,
     jobId,
@@ -535,7 +530,6 @@ async function main() {
   const getJobLogs = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'get_job_logs',
     {
       connectionId: connection.id,
@@ -556,7 +550,6 @@ async function main() {
   const getStacktraces = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'get_job_stacktraces',
     {
       connectionId: connection.id,
@@ -578,7 +571,6 @@ async function main() {
   const getFailureEvents = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'get_failure_events',
     {
       connectionId: connection.id,
@@ -601,7 +593,6 @@ async function main() {
   const getQueueMetrics = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'get_queue_metrics',
     {
       connectionId: connection.id,
@@ -629,7 +620,6 @@ async function main() {
   const getWorkers = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'get_workers',
     {
       connectionId: connection.id,
@@ -652,7 +642,6 @@ async function main() {
   const explainJobFailure = await callTool(
     baseUrl,
     delegatedFullToken,
-    delegatedInit.sessionId,
     'explain_job_failure',
     {
       connectionId: connection.id,
@@ -681,7 +670,6 @@ async function main() {
   const serviceListConnections = await callTool(
     baseUrl,
     serviceToken,
-    serviceInit.sessionId,
     'list_connections',
     { pageSize: 10 }
   )
@@ -698,7 +686,6 @@ async function main() {
   const deniedServicePing = await callTool(
     baseUrl,
     deniedServiceToken,
-    deniedServiceInit.sessionId,
     'ping',
     {}
   )
@@ -713,7 +700,6 @@ async function main() {
   const lowScopeListConnections = await callTool(
     baseUrl,
     delegatedLowScopeToken,
-    lowScopeInit.sessionId,
     'list_connections',
     { pageSize: 10 }
   )
