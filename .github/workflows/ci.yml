@@ -16,7 +16,7 @@ env:
 jobs:
   checks:
     name: Lint, Typecheck & Build
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,7 +66,7 @@ jobs:
 
   e2e:
     name: E2E Tests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: checks
     timeout-minutes: 30
     services:
@@ -175,7 +175,7 @@ jobs:
 
   e2e-authless:
     name: E2E Tests (Authless Stateless)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: checks
     timeout-minutes: 30
     services:
@@ -270,7 +270,7 @@ jobs:
 
   docker-image-smoke:
     name: Docker Image Smoke Test
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout
