@@ -14,7 +14,7 @@ permissions:
 jobs:
   docker:
     name: Smoke Test, Build & Publish Image
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,8 +47,8 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Docker metadata
         id: meta
@@ -69,7 +69,7 @@ jobs:
 
       - name: Build and push
         id: push
-        uses: useblacksmith/build-push-action@v2
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./tooling/docker/Dockerfile
@@ -77,6 +77,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
             DURABULL_APP_VERSION=${{ env.DURABULL_APP_VERSION }}
             DURABULL_BUILD_ID=${{ env.DURABULL_BUILD_ID }}
@@ -93,7 +95,7 @@ jobs:
 
   trigger-cloud-deploy-hook:
     name: Trigger Cloud Deploy Hook
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: docker
     if: success() && github.event_name == 'push'
     steps:
