@@ -350,6 +350,12 @@ export async function getQueue(
         ...buildIoRedisConnectionOptions(options),
       },
       prefix,
+      // Durabull observes queues that applications own. Without this, BullMQ
+      // writes this Queue's own defaults into `<prefix>:<name>:meta` on
+      // connect, including `opts.maxLenEvents = 10000`, which overrides the
+      // event-stream cap the owning app configured. On a noeviction Valkey
+      // that turns a bounded events stream into ~10x more memory.
+      skipMetasUpdate: true,
     })
 
     queue.on('error', (error) => {
