@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, mock } from 'bun:test'
 
 const queueInstances: Array<{
   name: string
-  opts: { prefix?: string; connection?: { url?: string } }
+  opts: { prefix?: string; skipMetasUpdate?: boolean; connection?: { url?: string } }
 }> = []
 const scanCalls: Array<Array<string | number>> = []
 let importId = 0
@@ -15,9 +15,12 @@ async function importFreshRedis(): Promise<typeof import('./redis')> {
 mock.module('bullmq', () => ({
   Queue: class MockQueue {
     name: string
-    opts: { prefix?: string; connection?: { url?: string } }
+    opts: { prefix?: string; skipMetasUpdate?: boolean; connection?: { url?: string } }
 
-    constructor(name: string, opts: { prefix?: string; connection?: { url?: string } }) {
+    constructor(
+      name: string,
+      opts: { prefix?: string; skipMetasUpdate?: boolean; connection?: { url?: string } }
+    ) {
       this.name = name
       this.opts = opts
       queueInstances.push(this)
@@ -77,6 +80,14 @@ describe('redis queue prefix handling', () => {
     expect(queueInstances.map((queue) => queue.opts.connection?.url)).toContain(
       'redis://localhost:6379/1'
     )
+  })
+
+  it('never overwrites the observed queue metadata', async () => {
+    const { getQueue } = await importFreshRedis()
+
+    await getQueue('conn-1', 'redis://localhost:6379/0', 'observed', 'bull')
+
+    expect(queueInstances.at(-1)?.opts.skipMetasUpdate).toBe(true)
   })
 
   it('escapes prefix glob characters when scanning queue metadata', async () => {
